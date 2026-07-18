@@ -95,6 +95,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. driver-rebuild: the per-turn guillotine/turn-budget is GONE, the new
+# continuous-run pieces are present, and a model-free integration test
+# proves the control flow (heartbeat, --max-problems stop, process-group
+# cleanup) without any network call or live model.
+# ---------------------------------------------------------------------------
+RUN_CELL="$PI_DIR/run_cell.sh"
+# Check the FUNCTIONAL old mechanism is gone (a variable/flag-case pattern),
+# not just that the string never appears anywhere -- the rewrite legitimately
+# documents the old, wrong design in an explanatory comment, which a bare
+# substring grep would false-positive on.
+if grep -qE '^\s*MAX_TURNS=' "$RUN_CELL" || grep -qE -- '--max-turns\)' "$RUN_CELL" \
+   || grep -qE 'timeout "\$\{PI_TURN_TIMEOUT' "$RUN_CELL"; then
+  fail "driver-rebuild: the old per-turn timeout guillotine / --max-turns chunking is still functionally present in run_cell.sh"
+else
+  pass "driver-rebuild: per-turn timeout guillotine and --max-turns chunking are functionally gone"
+fi
+if grep -q 'HEARTBEAT_INTERVAL' "$RUN_CELL" && grep -q 'STALL_TIMEOUT' "$RUN_CELL" \
+   && grep -q 'PI_BIN' "$RUN_CELL" && grep -qi 'process group' "$RUN_CELL"; then
+  pass "driver-rebuild: heartbeat/stall-watchdog/PI_BIN/process-group-cleanup are present"
+else
+  fail "driver-rebuild: expected heartbeat/stall-timeout/PI_BIN/process-group pieces missing from run_cell.sh"
+fi
+
+TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
+if [[ ! -x "$TEST_RUN_CELL" ]]; then
+  fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"
+else
+  TEST_OUT="$(bash "$TEST_RUN_CELL" 2>&1)"
+  TEST_RC=$?
+  if [[ "$TEST_RC" -eq 0 ]] && echo "$TEST_OUT" | grep -q 'TEST_RUN_CELL: ALL CHECKS PASSED'; then
+    pass "driver-rebuild: model-free integration test (heartbeat + max-problems stop + no orphaned process) passed"
+  else
+    fail "driver-rebuild: integration test failed (rc=$TEST_RC)"
+    echo "$TEST_OUT"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 4. smoke: live pi run artifact
 # ---------------------------------------------------------------------------
 # run_cell.sh copies the cell's export.json to pi/artifacts/<language>_export.json

@@ -3,8 +3,25 @@
 # config (global ~/.pi/agent/AGENTS.md, extensions, skills) as the agent
 # wrapper -- that personal config is exactly what's under test here.
 #
+# METHODOLOGY: runs ONE continuous pi session through the cell, matching the
+# paper's own harnesses (claude/codex/opencode each run a single unbroken
+# session across all 80 problems). This driver does NOT chop the run into
+# fixed-size time slices -- earlier revisions did (a `timeout 300` per turn +
+# a `--max-turns` re-invocation loop), which both fragmented the agent's
+# context mid-problem AND gave no real observability between the 5-minute
+# guillotine prints. That was wrong on both counts; see pi/README.md.
+#
+# Observability instead comes from disk, not from chopping the run or from
+# `pi --mode json`: harness_state.json is the authoritative benchmark
+# progress (updated by the harness itself on every fetch/submit), and the
+# child's own session .jsonl file growing is the liveness signal (it's
+# written continuously as the model thinks/acts). A background heartbeat
+# prints both every --heartbeat-interval seconds while the single pi session
+# runs. A --stall-timeout watchdog kills the run only if the session file
+# goes genuinely quiet for that long (a real hang), never on elapsed time.
+#
 # Usage:
-#   pi/run_cell.sh --model <id> --language <lang> [--max-turns N] [--max-problems N] [--dataset-file PATH]
+#   pi/run_cell.sh --model <id> --language <lang> [options]
 #
 # --model is REQUIRED. There is no default -- an omitted --model is an error,
 # by design (the operator picks the model deliberately per run).
@@ -13,25 +30,36 @@
 #   1. pi/load_dataset.py has been run (real dataset present, see --dataset-file).
 #   2. pi/setup_cells.py has been run (cell dir with harness.py + AGENTS.md symlinks exists).
 #
-# SAFETY (learned the hard way): the child `pi` is a SEPARATE process/session
-# from whatever pi session launched this script. If this repo is a `bench`-
-# managed clone, the bench-lock guard will BLOCK the child's bash/read/write
-# entirely unless it's given an authorized session id -- pass one via
-# --session-id (mint it with the `bench` tool's grant:true option in the
-# LAUNCHING session first). Separately, by default the child's tool surface is
-# restricted to read/bash/edit/write only (--tools), NOT the full extension
-# set -- an earlier run let the child discover and call craft_takeover on the
-# launching session's OWN live craft workflow, rebinding it out from under
-# that session. Override with --allowed-tools if you understand that risk.
-set -euo pipefail
+# SAFETY (learned the hard way):
+#   - The child `pi` is a SEPARATE process/session from whatever pi session
+#     launched this script. If this repo is a `bench`-managed clone, the
+#     bench-lock guard will BLOCK the child's bash/read/write entirely unless
+#     it's given an authorized session id -- pass one via --session-id (mint
+#     it with the `bench` tool's grant:true option in the LAUNCHING session
+#     first). Prefer running this driver from a plain (non-bench) clone.
+#   - By default the child's tool surface is restricted to read/bash/edit/write
+#     only (--tools), NOT the full extension set -- an earlier run let a
+#     blocked child discover and call craft_takeover on the launching
+#     session's OWN live craft workflow, rebinding it out from under that
+#     session. Override with --allowed-tools if you understand that risk.
+#   - The child pi runs in its OWN process group (via `set -m`); on exit,
+#     Ctrl-C, or a stall-kill, this script terminates that whole group so no
+#     orphaned grandchild process (or further-nested tool subprocess) is left
+#     running after this script exits.
+set -uo pipefail
+set -m  # job control: give the backgrounded pi its own process group
 
 PI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$PI_DIR/.." && pwd)"
+PI_BIN="${PI_BIN:-pi}"  # override for testing: PI_BIN=/path/to/fake_pi.sh
 
 MODEL=""
 LANGUAGE=""
-MAX_TURNS=40
 MAX_PROBLEMS=""
+MAX_CONTINUATIONS=3
+HEARTBEAT_INTERVAL=15
+STALL_TIMEOUT=240
+POLL_INTERVAL=2
 DATASET_FILE="$REPO_ROOT/benchmark_harness/private/esolang_full_private.local.json"
 SESSION_ID_OVERRIDE=""
 ALLOWED_TOOLS="read,bash,edit,write"
@@ -46,9 +74,18 @@ Required:
   --language <lang>       One of: brainfuck, befunge-98, whitespace, shakespeare
 
 Options:
-  --max-turns N           Max pi invocations before bailing (default: $MAX_TURNS)
   --max-problems N        Stop once N problems have been finalized (solved/failed/skipped)
-                           -- for smoke-testing; default: unset = run to all 80
+                           -- an explicit bounded-test stop; default: unset = run to all 80.
+  --max-continuations N   Cap on early-yield re-nudges: if the single pi session ends
+                           naturally with problems still unattempted, re-prompt it to
+                           continue, up to N times (default: $MAX_CONTINUATIONS). This is
+                           NOT periodic chunking -- it only fires if the session actually
+                           stops talking on its own while unfinished.
+  --heartbeat-interval S  Seconds between progress heartbeat lines (default: $HEARTBEAT_INTERVAL).
+  --stall-timeout S       Seconds of NO session-file growth before treating the run as
+                           hung and killing it (default: $STALL_TIMEOUT). This is a liveness
+                           check, not a fixed run-length cap -- a slow but active run never
+                           trips it.
   --dataset-file PATH     Private JSON to use as HARNESS_PRIVATE_FILE
                            (default: benchmark_harness/private/esolang_full_private.local.json)
   --session-id ID         pi session id for the child (default: pi-esolang-<language>).
@@ -66,8 +103,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="${2:-}"; shift 2 ;;
     --language) LANGUAGE="${2:-}"; shift 2 ;;
-    --max-turns) MAX_TURNS="${2:-}"; shift 2 ;;
     --max-problems) MAX_PROBLEMS="${2:-}"; shift 2 ;;
+    --max-continuations) MAX_CONTINUATIONS="${2:-}"; shift 2 ;;
+    --heartbeat-interval) HEARTBEAT_INTERVAL="${2:-}"; shift 2 ;;
+    --stall-timeout) STALL_TIMEOUT="${2:-}"; shift 2 ;;
     --dataset-file) DATASET_FILE="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID_OVERRIDE="${2:-}"; shift 2 ;;
     --allowed-tools) ALLOWED_TOOLS="${2:-}"; shift 2 ;;
@@ -106,55 +145,179 @@ fi
 SESSION_DIR="$CELL_DIR/.pi-sessions"
 mkdir -p "$SESSION_DIR"
 SESSION_ID="${SESSION_ID_OVERRIDE:-pi-esolang-$LANGUAGE}"
+RUN_LOG="$CELL_DIR/.run_cell.log"
 
-status_field() {
-  # $1: field label as printed by harness.py status, e.g. "Solved:"
-  python3 harness.py status | awk -v f="$1" '$0 ~ "^"f {print $2}'
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Parses `harness.py status` once into ST_* globals.
+harness_status() {
+  local out
+  out="$(python3 harness.py status)"
+  # "Solved:" prints as "N/80" -- take just N (it's used in arithmetic below).
+  ST_SOLVED=$(awk '/^Solved:/{split($2,a,"/"); print a[1]}' <<<"$out")
+  ST_FAILED=$(awk '/^Failed:/{print $2}' <<<"$out")
+  ST_SKIPPED=$(awk '/^Skipped:/{print $2}' <<<"$out")
+  ST_ACTIVE=$(awk '/^Active:/{print $2}' <<<"$out")
+  ST_REMAINING=$(awk '/^Remaining:/{print $2}' <<<"$out")
+  ST_TESTS=$(awk '/^Test cases passed:/{print $4}' <<<"$out")
+  ST_CURRENT=$(awk -F': ' '/^Current problem:/{print $2}' <<<"$out")
+  ST_FINALIZED=$(( ST_SOLVED + ST_FAILED + ST_SKIPPED ))
 }
 
-for ((i = 1; i <= MAX_TURNS; i++)); do
-  solved=$(status_field "Solved:")
-  failed=$(status_field "Failed:")
-  skipped=$(status_field "Skipped:")
-  active=$(status_field "Active:")
-  remaining=$(status_field "Remaining:")
-  finalized=$((solved + failed + skipped))
+# Prints "<mtime_epoch> <size_bytes>" for the most recently modified .jsonl
+# under SESSION_DIR, or "0 0" if none exist yet. Uses python3 (already a hard
+# dependency of the harness) instead of `stat`, whose flags differ between
+# macOS/BSD and GNU/Linux.
+session_liveness() {
+  python3 - "$SESSION_DIR" <<'PYEOF'
+import glob, os, sys
+files = glob.glob(os.path.join(sys.argv[1], "**", "*.jsonl"), recursive=True)
+if not files:
+    print("0 0")
+else:
+    f = max(files, key=os.path.getmtime)
+    print(int(os.path.getmtime(f)), os.path.getsize(f))
+PYEOF
+}
 
-  echo "[run_cell] turn $i/$MAX_TURNS -- solved=$solved failed=$failed skipped=$skipped active=$active remaining=$remaining"
+PI_PID=""
+PI_PGID=""
+EXPORTED=0
 
-  if [[ -n "$MAX_PROBLEMS" && "$finalized" -ge "$MAX_PROBLEMS" ]]; then
-    echo "[run_cell] reached --max-problems=$MAX_PROBLEMS finalized problems, stopping."
-    break
+kill_child_group() {
+  [[ -z "$PI_PGID" ]] && return 0
+  if kill -0 "-$PI_PGID" 2>/dev/null; then
+    kill -TERM "-$PI_PGID" 2>/dev/null
+    sleep 2
+    kill -0 "-$PI_PGID" 2>/dev/null && kill -KILL "-$PI_PGID" 2>/dev/null
   fi
-  if [[ "$remaining" -eq 0 && "$active" -eq 0 ]]; then
-    echo "[run_cell] all 80 problems finalized, stopping."
-    break
-  fi
+}
 
-  if [[ "$i" -eq 1 ]]; then
-    PROMPT='Read AGENTS.md and follow it exactly. This session is initialized. Begin with: python3 harness.py fetch. Solve problems in order. Use python3 harness.py run <file> --input "..." to test. Then python3 harness.py submit <id> <file>. Max 3 submissions per problem.'
+finalize_export() {
+  [[ "$EXPORTED" -eq 1 ]] && return 0
+  EXPORTED=1
+  python3 harness.py export || true
+  local artifacts_dir="$PI_DIR/artifacts"
+  mkdir -p "$artifacts_dir"
+  [[ -f "$CELL_DIR/export.json" ]] && cp "$CELL_DIR/export.json" "$artifacts_dir/${LANGUAGE}_export.json"
+}
+
+cleanup() {
+  kill_child_group
+  finalize_export
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+INITIAL_PROMPT='Read AGENTS.md and follow it exactly. This session is initialized. Begin with: python3 harness.py fetch. Solve problems in order. Use python3 harness.py run <file> --input "..." to test. Then python3 harness.py submit <id> <file>. Max 3 submissions per problem. Work through ALL problems in this SAME session, one after another -- do not stop until every problem has been attempted (solved or all 3 submissions used) or the run is deliberately halted for you.'
+
+continuation_prompt() {
+  harness_status
+  echo "You stopped, but problems remain unattempted (current: ${ST_CURRENT:-none}, remaining: ${ST_REMAINING:-?}, active: ${ST_ACTIVE:-?}). Continue immediately: run python3 harness.py status if unsure where you left off, then proceed to fetch/solve/submit the current or next problem exactly per AGENTS.md. Do not stop again until all problems are attempted."
+}
+
+# ---------------------------------------------------------------------------
+# Main run loop: ONE continuous session per attempt; re-launch (a bounded
+# number of times) ONLY if the session ends naturally with work remaining.
+# ---------------------------------------------------------------------------
+
+STOP_REASON=""
+attempt=1
+max_attempts=$(( MAX_CONTINUATIONS + 1 ))
+
+while (( attempt <= max_attempts )); do
+  if [[ "$attempt" -eq 1 ]]; then
+    PROMPT="$INITIAL_PROMPT"
+    echo "[run_cell] starting continuous pi session (attempt $attempt/$max_attempts)"
   else
-    PROMPT='Continue. Run python3 harness.py status if unsure where you left off, then proceed with the current or next problem exactly per AGENTS.md.'
+    PROMPT="$(continuation_prompt)"
+    echo "[run_cell] early-yield re-nudge (attempt $attempt/$max_attempts)"
   fi
 
-  # A per-turn timeout is EXPECTED (a small model can take minutes to work
-  # through fetch->write->run->submit in one autonomous turn) -- tolerate it
-  # and let the next loop iteration pick up wherever harness_state.json
-  # actually landed, rather than aborting the whole driver on `set -e`.
-  set +e
-  timeout "${PI_TURN_TIMEOUT:-300}" pi -p --model "$MODEL" --session-dir "$SESSION_DIR" \
-    --session-id "$SESSION_ID" --tools "$ALLOWED_TOOLS" -a "$PROMPT"
-  turn_rc=$?
-  set -e
-  if [[ "$turn_rc" -eq 124 ]]; then
-    echo "[run_cell] turn $i timed out after ${PI_TURN_TIMEOUT:-300}s -- continuing to next turn"
-  elif [[ "$turn_rc" -ne 0 ]]; then
-    echo "[run_cell] turn $i exited $turn_rc -- continuing to next turn"
+  "$PI_BIN" -p --model "$MODEL" --session-dir "$SESSION_DIR" --session-id "$SESSION_ID" \
+    --tools "$ALLOWED_TOOLS" -a "$PROMPT" > "$RUN_LOG" 2>&1 &
+  PI_PID=$!
+  PI_PGID="$(ps -o pgid= -p "$PI_PID" 2>/dev/null | tr -d ' ')"
+
+  last_heartbeat=0
+  start_ts=$(date +%s)
+  killed_this_attempt=""
+
+  while kill -0 "$PI_PID" 2>/dev/null; do
+    now=$(date +%s)
+    read -r live_mtime live_size < <(session_liveness)
+    if [[ "$live_mtime" == "0" ]]; then
+      idle=$(( now - start_ts ))
+    else
+      idle=$(( now - live_mtime ))
+    fi
+
+    if (( now - last_heartbeat >= HEARTBEAT_INTERVAL )); then
+      harness_status
+      echo "[run_cell] heartbeat -- solved=${ST_SOLVED}/80 failed=${ST_FAILED} skipped=${ST_SKIPPED} active=${ST_ACTIVE} remaining=${ST_REMAINING} current=${ST_CURRENT:-none} tests=${ST_TESTS:-0/0} | session +${live_size}B, last activity ${idle}s ago"
+      last_heartbeat=$now
+    fi
+
+    if (( idle >= STALL_TIMEOUT )); then
+      echo "[run_cell] STALL DETECTED -- no session activity for ${idle}s (>= --stall-timeout ${STALL_TIMEOUT}s). Killing the child process group."
+      kill_child_group
+      STOP_REASON="stalled"
+      killed_this_attempt=1
+      break
+    fi
+
+    if [[ -n "$MAX_PROBLEMS" ]]; then
+      harness_status
+      if (( ST_FINALIZED >= MAX_PROBLEMS )); then
+        echo "[run_cell] reached --max-problems=$MAX_PROBLEMS finalized problems. Stopping the run."
+        kill_child_group
+        STOP_REASON="max_problems"
+        killed_this_attempt=1
+        break
+      fi
+    fi
+
+    sleep "$POLL_INTERVAL"
+  done
+
+  wait "$PI_PID" 2>/dev/null
+  PI_PID=""
+  PI_PGID=""
+
+  if [[ -n "$killed_this_attempt" ]]; then
+    break
+  fi
+
+  # The session ended on its own (no kill from us). Check whether it
+  # actually finished the benchmark.
+  harness_status
+  if (( ST_REMAINING == 0 && ST_ACTIVE == 0 )); then
+    echo "[run_cell] session ended naturally -- all problems finalized."
+    STOP_REASON="completed"
+    break
+  fi
+
+  echo "[run_cell] session ended naturally but work remains (remaining=${ST_REMAINING}, active=${ST_ACTIVE})."
+  attempt=$(( attempt + 1 ))
+  if (( attempt > max_attempts )); then
+    STOP_REASON="continuation_cap"
+    echo "[run_cell] --max-continuations=$MAX_CONTINUATIONS reached with work still remaining. Stopping."
   fi
 done
 
-python3 harness.py export
-ARTIFACTS_DIR="$PI_DIR/artifacts"
-mkdir -p "$ARTIFACTS_DIR"
-cp "$CELL_DIR/export.json" "$ARTIFACTS_DIR/${LANGUAGE}_export.json"
-echo "[run_cell] done. export.json written in $CELL_DIR (and copied to $ARTIFACTS_DIR/${LANGUAGE}_export.json)"
+harness_status
+echo "[run_cell] done (reason: ${STOP_REASON:-unknown}) -- solved=${ST_SOLVED}/80 failed=${ST_FAILED} skipped=${ST_SKIPPED} active=${ST_ACTIVE} remaining=${ST_REMAINING}"
+# `finalize_export` + `kill_child_group` also run via the EXIT trap, but call
+# explicitly here too so the printed path is accurate before the trap fires.
+finalize_export
+echo "[run_cell] export written to $CELL_DIR/export.json (and copied to $PI_DIR/artifacts/${LANGUAGE}_export.json)"
+
+case "$STOP_REASON" in
+  completed|max_problems) exit 0 ;;
+  *) exit 1 ;;
+esac

@@ -18,8 +18,9 @@ benchmark.
 |---|---|
 | `load_dataset.py` | Pulls the **real, unredacted** hidden tests from the `Lossfunk/Esolang-Bench` HuggingFace dataset and writes them to a git-ignored local file. **Never commit this file's output** — see Dataset below. |
 | `setup_cells.py` | Builds `experiments/01_main_experiments/pi/<language>/` cells (harness + `AGENTS.md` symlinks), mirroring `scripts/setup_main_grid.py`'s pattern but without a fixed model subdirectory. |
-| `run_cell.sh` | Headless driver: loops `pi -p`/session-continuation against a cell until it's finished (or a smoke cap is hit). **`--model` is a required flag — omitting it is an error, by design**, so the model under test is always a deliberate choice, never a silent default. |
+| `run_cell.sh` | Headless driver: runs **one continuous `pi` session** through a cell to completion (methodology-faithful — no chunking). **`--model` is a required flag — omitting it is an error, by design**, so the model under test is always a deliberate choice, never a silent default. |
 | `audit.sh` | Deterministic, no-network, no-live-model-call check that everything above is wired correctly (used by the craft workflow that built this). |
+| `tests/` | Model-free integration test (`test_run_cell.sh` + a `fake_pi.sh` stand-in for the real `pi` CLI) exercising the driver's heartbeat/stall-watchdog/cleanup control flow with no network or model call. |
 | `artifacts/` | Git-ignored scratch space for run exports (e.g. smoke-test output). |
 
 ## 1. Environment setup
@@ -75,17 +76,58 @@ run, so the number you get is never accidentally attributed to the wrong
 model.
 
 Optional flags:
-- `--max-turns N` — cap on pi invocations before bailing (default 40).
-- `--max-problems N` — stop once N problems have been finalized
-  (solved/failed/skipped); useful for a bounded smoke test instead of the
-  full 80-problem grind.
+- `--max-problems N` — an explicit **bounded-test stop**: terminate once N
+  problems have been finalized (solved/failed/skipped). Useful for a quick
+  smoke run instead of the full 80-problem grind. This is a deliberate,
+  monitored stop, not periodic chunking (see Methodology below).
+- `--max-continuations N` (default 3) — if the single pi session ends on its
+  own with problems still unattempted, the driver re-prompts it to continue,
+  up to N times. This only fires on a genuine early yield, never on a timer.
+- `--heartbeat-interval S` (default 15) — seconds between progress heartbeat
+  lines while the run is in flight.
+- `--stall-timeout S` (default 240) — seconds of **zero session-file
+  growth** (i.e. the model has produced no new output/tool activity at all)
+  before the run is treated as hung and killed. This is a liveness check, not
+  a run-length cap — a slow-but-active run (e.g. a big interpreter loop
+  inside one `run` call) never trips it.
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
 
-The driver re-invokes `pi -p` against the **same session** (`--session-id`)
-each turn so context carries across the run, checks `python3 harness.py
-status` between turns to decide whether to continue, and finally writes
-`export.json` inside the cell directory (also git-ignored).
+### Methodology: one continuous session, not chunked turns
+
+The driver launches **exactly one `pi -p` session** and lets it run to
+completion — matching the paper's own harnesses (`claude`/`codex`/`opencode`
+each drive a single unbroken session across all 80 problems, so the agent can
+build and reuse helpers/generators across problems within that one context).
+An earlier revision of this driver instead killed the session every 300s and
+stitched it back together with "Continue." prompts; that both fragmented the
+agent's context mid-problem and gave near-zero visibility between the
+5-minute cuts. Neither is true anymore.
+
+### Observability: from disk, not from chopping the run
+
+While the single session runs, the driver polls **two things on disk** (no
+`--mode json` event parsing, no coupling to pi's internal event schema):
+
+- **`harness_state.json`** — the harness's own authoritative benchmark
+  progress (updated on every `fetch`/`submit`). This drives the printed
+  `solved=X/80 ... current=EnnN` heartbeat fields.
+- **The child's own session `.jsonl`** (under `.pi-sessions/`) — it grows
+  continuously as the model thinks/acts. Its size + last-modified time is the
+  **liveness** signal: `+NKB, last activity Ns ago` in the heartbeat, and the
+  input to the `--stall-timeout` watchdog.
+
+Example heartbeat line:
+```
+[run_cell] heartbeat -- solved=3/80 failed=0 skipped=0 active=1 remaining=76 current=E04 tests=18/18 | session +214KB, last activity 4s ago
+```
+
+On exit (natural completion, a stall-kill, `--max-problems`, Ctrl-C, or a
+crash), the driver terminates the child pi's **entire process group** — not
+just its direct PID — so no grandchild process (e.g. one spawned by the
+model's own bash tool calls) survives as an orphan, and always writes
+`export.json` (+ the `pi/artifacts/<language>_export.json` copy) with
+whatever progress was made.
 
 ## Comparing to the paper
 
