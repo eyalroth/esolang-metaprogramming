@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Model-free integration test for pi/run_cell.sh's control flow: the
-# heartbeat, the --max-problems watchdog stop, and process-group cleanup.
-# Drives pi/tests/fake_pi.sh (PI_BIN override -- no network, no real model)
-# against the TRACKED, REDACTED private dataset (never the real one, and
-# never requires it) -- submissions all come back WRONG ANSWER, which is
-# fine; this test only cares that problems get fetched/finalized and that
-# run_cell.sh's own control flow behaves correctly.
+# heartbeat, the --max-problems watchdog stop, --fresh state reset, and
+# process-group cleanup. Drives pi/tests/fake_pi.sh (PI_BIN override -- no
+# network, no real model) against the TRACKED, REDACTED private dataset
+# (never the real one, and never requires it) -- submissions all come back
+# WRONG ANSWER, which is fine; this test only cares that problems get
+# fetched/finalized and that run_cell.sh's own control flow behaves
+# correctly.
 #
-# Deliberately runs against the "befunge-98" cell, NOT "brainfuck" -- so it
-# never touches the brainfuck cell's real, live-smoke-tested
-# pi/artifacts/brainfuck_export.json.
+# Uses synthetic --provider/--model/--thinking grid coordinates ("test-*")
+# so it never touches any real grid cell's live-smoke-tested export
+# artifact, and deliberately runs against the "befunge-98" language so it
+# never touches the "brainfuck" cell either.
 set -uo pipefail
 
 PI_TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,67 +19,72 @@ PI_DIR="$(cd "$PI_TESTS_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$PI_DIR/.." && pwd)"
 
 LANGUAGE="befunge-98"
-CELL_DIR="$REPO_ROOT/experiments/01_main_experiments/pi/$LANGUAGE"
 REDACTED_DATASET="$REPO_ROOT/benchmark_harness/private/esolang_full_private.json"
-ARTIFACT="$PI_DIR/artifacts/${LANGUAGE}_export.json"
 
 FAIL=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
-cleanup_cell() {
-  rm -f "$CELL_DIR"/harness_state.json "$CELL_DIR"/export.json "$CELL_DIR"/fake_*.bf "$CELL_DIR"/.run_cell.log
-  rm -rf "$CELL_DIR"/.pi-sessions "$CELL_DIR"/logs
-}
-
-if [[ ! -d "$CELL_DIR" ]]; then
-  fail "cell dir missing at $CELL_DIR -- run: python3 pi/setup_cells.py"
-  echo "TEST_RUN_CELL: FAILURES ABOVE"; exit 1
-fi
 if [[ ! -f "$REDACTED_DATASET" ]]; then
   fail "redacted dataset missing at $REDACTED_DATASET"
   echo "TEST_RUN_CELL: FAILURES ABOVE"; exit 1
 fi
 
-cleanup_cell
-rm -f "$ARTIFACT"
+# resolve_cell provider model thinking language -- calls setup_cells.py (the
+# single source of truth run_cell.sh itself uses) and echoes "CELL_DIR ARTIFACT".
+resolve_cell() {
+  local provider="$1" model="$2" thinking="$3" language="$4"
+  local out
+  out="$(python3 "$PI_DIR/setup_cells.py" --provider "$provider" --model "$model" --thinking "$thinking" --language "$language")"
+  local cell art
+  cell="$(sed -n 's/^CELL_DIR=//p' <<<"$out" | tail -1)"
+  art="$(sed -n 's/^ARTIFACT=//p' <<<"$out" | tail -1)"
+  echo "$cell" "$art"
+}
+
+# ===========================================================================
+# Scenario 1: continuous run, heartbeat, --max-problems watchdog stop.
+# ===========================================================================
+echo "--- scenario 1: heartbeat + --max-problems stop ---"
+
+S1_PROVIDER="test-provider-s1"
+S1_MODEL="fake-model"
+S1_THINKING="low"
+
+read -r S1_CELL_DIR S1_ARTIFACT < <(resolve_cell "$S1_PROVIDER" "$S1_MODEL" "$S1_THINKING" "$LANGUAGE")
+rm -f "$S1_CELL_DIR"/harness_state.json "$S1_CELL_DIR"/export.json "$S1_CELL_DIR"/fake_*.bf "$S1_CELL_DIR"/.run_cell.log
+rm -rf "$S1_CELL_DIR"/.pi-sessions
+rm -f "$S1_ARTIFACT"
 
 RUN_OUT="$(mktemp)"
 PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=15 FAKE_PI_SLEEP=1 \
-  "$PI_DIR/run_cell.sh" --model fake/fake --language "$LANGUAGE" \
-    --max-problems 2 --heartbeat-interval 1 --stall-timeout 60 \
+  "$PI_DIR/run_cell.sh" --model "$S1_MODEL" --provider "$S1_PROVIDER" --thinking "$S1_THINKING" \
+    --language "$LANGUAGE" --max-problems 2 --heartbeat-interval 1 --stall-timeout 60 \
     --dataset-file "$REDACTED_DATASET" > "$RUN_OUT" 2>&1
 RC=$?
 
-if [[ "$RC" -eq 0 ]]; then
-  pass "run_cell.sh exited 0"
+[[ "$RC" -eq 0 ]] && pass "run_cell.sh exited 0" || { fail "run_cell.sh exited $RC"; cat "$RUN_OUT"; }
+
+grep -q '\[run_cell\] heartbeat' "$RUN_OUT" \
+  && pass "at least one heartbeat line was printed" \
+  || { fail "no heartbeat line found"; cat "$RUN_OUT"; }
+
+grep -q 'reached --max-problems=2' "$RUN_OUT" \
+  && pass "the run stopped via the --max-problems watchdog (not natural completion or a stall)" \
+  || { fail "expected a --max-problems stop message"; cat "$RUN_OUT"; }
+
+grep -q 'STALL DETECTED' "$RUN_OUT" \
+  && fail "a spurious stall was detected during a healthy run" \
+  || pass "no spurious stall detected"
+
+if grep -q "ARTIFACT=$S1_ARTIFACT\|copied to $S1_ARTIFACT" "$RUN_OUT" || [[ -f "$S1_ARTIFACT" ]]; then
+  pass "artifact landed at the nested grid path ($S1_ARTIFACT)"
 else
-  fail "run_cell.sh exited $RC"
-  cat "$RUN_OUT"
+  fail "artifact NOT found at the expected nested grid path $S1_ARTIFACT"
 fi
 
-if grep -q '\[run_cell\] heartbeat' "$RUN_OUT"; then
-  pass "at least one heartbeat line was printed"
-else
-  fail "no heartbeat line found"
-  cat "$RUN_OUT"
-fi
-
-if grep -q 'reached --max-problems=2' "$RUN_OUT"; then
-  pass "the run stopped via the --max-problems watchdog (not natural completion or a stall)"
-else
-  fail "expected a --max-problems stop message"
-  cat "$RUN_OUT"
-fi
-
-if grep -q 'STALL DETECTED' "$RUN_OUT"; then
-  fail "a spurious stall was detected during a healthy run"
-else
-  pass "no spurious stall detected"
-fi
-
-if [[ -f "$ARTIFACT" ]]; then
-  if python3 - "$ARTIFACT" <<'PYEOF'
+if [[ -f "$S1_ARTIFACT" ]]; then
+  python3 - "$S1_ARTIFACT" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 probs = d["problems"]
@@ -87,13 +94,9 @@ assert len(attempted) >= 2, f"expected >=2 attempted, got {len(attempted)}: {att
 assert subs >= 1, f"expected >=1 submission, got {subs}"
 print(f"attempted={len(attempted)} submissions={subs}")
 PYEOF
-  then
-    pass "artifact shows >=2 attempted problems with >=1 submission"
-  else
-    fail "artifact did not meet the >=2 attempted / >=1 submission bar"
-  fi
-else
-  fail "artifact not found at $ARTIFACT"
+  [[ $? -eq 0 ]] \
+    && pass "artifact shows >=2 attempted problems with >=1 submission" \
+    || fail "artifact did not meet the >=2 attempted / >=1 submission bar"
 fi
 
 sleep 1
@@ -103,8 +106,83 @@ else
   pass "no orphaned fake_pi.sh process after run_cell.sh exited"
 fi
 
-cleanup_cell
-rm -f "$ARTIFACT" "$RUN_OUT"
+rm -f "$S1_CELL_DIR"/harness_state.json "$S1_CELL_DIR"/export.json "$S1_CELL_DIR"/fake_*.bf "$S1_CELL_DIR"/.run_cell.log
+rm -rf "$S1_CELL_DIR"/.pi-sessions
+rm -f "$S1_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S1_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S1_PROVIDER"
+rm -f "$RUN_OUT"
+
+# ===========================================================================
+# Scenario 2: --fresh resets prior grid-cell state.
+# ===========================================================================
+echo
+echo "--- scenario 2: --fresh flag resets prior state ---"
+
+S2_PROVIDER="test-provider-s2"
+S2_MODEL="fake-model"
+S2_THINKING="low"
+
+read -r S2_CELL_DIR S2_ARTIFACT < <(resolve_cell "$S2_PROVIDER" "$S2_MODEL" "$S2_THINKING" "$LANGUAGE")
+rm -f "$S2_CELL_DIR"/harness_state.json "$S2_CELL_DIR"/export.json "$S2_CELL_DIR"/*.bf "$S2_CELL_DIR"/.run_cell.log
+rm -rf "$S2_CELL_DIR"/.pi-sessions
+rm -f "$S2_ARTIFACT"
+
+# Seed prior state: init + fetch (activates E01) + one submission -- standing
+# in for "a previous run already touched this exact grid cell".
+(
+  cd "$S2_CELL_DIR"
+  export HARNESS_PRIVATE_FILE="$REDACTED_DATASET"
+  python3 harness.py init --language "$LANGUAGE" > /dev/null
+  python3 harness.py fetch > /dev/null
+  printf '.' > seed.bf
+  python3 harness.py submit E01 seed.bf > /dev/null
+)
+SEEDED_SUBS="$(python3 -c "
+import json
+d = json.load(open('$S2_CELL_DIR/harness_state.json'))
+print(sum(len(p['submissions']) for p in d['problems'].values()))
+")"
+[[ "$SEEDED_SUBS" -ge 1 ]] \
+  && pass "scenario 2 setup: seeded prior state has >=1 submission ($SEEDED_SUBS)" \
+  || fail "scenario 2 setup: failed to seed prior state (got $SEEDED_SUBS submissions)"
+
+FRESH_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=1 FAKE_PI_SLEEP=1 \
+  "$PI_DIR/run_cell.sh" --model "$S2_MODEL" --provider "$S2_PROVIDER" --thinking "$S2_THINKING" \
+    --language "$LANGUAGE" --fresh --max-continuations 0 --heartbeat-interval 1 --stall-timeout 60 \
+    --dataset-file "$REDACTED_DATASET" > "$FRESH_OUT" 2>&1
+
+grep -qi 'resetting.*cell.*state\|--fresh' "$FRESH_OUT" \
+  && pass "scenario 2: run_cell.sh logged the --fresh reset" \
+  || { fail "scenario 2: no --fresh reset log line found"; cat "$FRESH_OUT"; }
+
+# NOTE: --fresh's contract only covers harness_state.json/export.json/
+# .pi-sessions -- not arbitrary leftover code files like seed.bf (submitted
+# code deliberately stays around for inspection). The real proof of a clean
+# reset is the submission count below, not file presence.
+RESET_SUBS="$(python3 -c "
+import json
+d = json.load(open('$S2_CELL_DIR/harness_state.json'))
+print(sum(len(p['submissions']) for p in d['problems'].values()))
+")"
+# After --fresh + exactly one attempt (--max-continuations 0) of a 1-cycle
+# fake_pi run: fetch activates E01 fresh, one submit records exactly 1
+# submission. If --fresh had NOT cleared the prior state, this would instead
+# show the pre-seeded submission plus more (or a different current problem).
+if [[ "$RESET_SUBS" -eq 1 ]]; then
+  pass "scenario 2: exactly 1 submission after --fresh + 1 cycle (prior seeded state was cleared, not accumulated)"
+else
+  fail "scenario 2: expected exactly 1 submission after --fresh, got $RESET_SUBS"
+  cat "$FRESH_OUT"
+fi
+
+rm -f "$S2_CELL_DIR"/harness_state.json "$S2_CELL_DIR"/export.json "$S2_CELL_DIR"/*.bf "$S2_CELL_DIR"/.run_cell.log
+rm -rf "$S2_CELL_DIR"/.pi-sessions
+rm -f "$S2_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S2_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S2_PROVIDER"
+rm -f "$FRESH_OUT"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

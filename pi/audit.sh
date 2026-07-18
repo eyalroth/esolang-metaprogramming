@@ -69,22 +69,30 @@ BF
 fi
 
 # ---------------------------------------------------------------------------
-# 2. cell-setup
+# 2. cell-setup: on-demand grid cells (harness x provider x model x thinking
+# x language). Use a clearly-marked throwaway grid point so this never
+# collides with a real result; clean it up afterward.
 # ---------------------------------------------------------------------------
-BF_CELL="$REPO_ROOT/experiments/01_main_experiments/pi/brainfuck"
-if [[ -L "$BF_CELL/harness.py" && -L "$BF_CELL/AGENTS.md" ]] \
-   && [[ -e "$BF_CELL/harness.py" && -e "$BF_CELL/AGENTS.md" ]]; then
-  pass "cell-setup: pi/brainfuck cell symlinks exist and resolve"
+AUDIT_PROVIDER="_audit_provider"
+AUDIT_MODEL="_audit_model"
+SETUP_OUT="$("$PY" "$PI_DIR/setup_cells.py" --provider "$AUDIT_PROVIDER" --model "$AUDIT_MODEL" --language brainfuck 2>&1)"
+SETUP_RC=$?
+AUDIT_CELL="$(sed -n 's/^CELL_DIR=//p' <<<"$SETUP_OUT" | tail -1)"
+if [[ "$SETUP_RC" -eq 0 && -n "$AUDIT_CELL" \
+      && -L "$AUDIT_CELL/harness.py" && -L "$AUDIT_CELL/AGENTS.md" \
+      && -e "$AUDIT_CELL/harness.py" && -e "$AUDIT_CELL/AGENTS.md" \
+      && "$AUDIT_CELL" == */"$AUDIT_PROVIDER"/"$AUDIT_MODEL"/*/brainfuck ]]; then
+  pass "cell-setup: a grid cell (provider/model/thinking/language) builds on demand with resolving symlinks at the nested path"
 else
-  fail "cell-setup: pi/brainfuck cell missing/broken symlinks -- run: python3 pi/setup_cells.py"
+  fail "cell-setup: grid cell build failed or symlinks broken (rc=$SETUP_RC, cell=$AUDIT_CELL)"
+  echo "$SETUP_OUT"
 fi
-for lang in brainfuck befunge-98 whitespace shakespeare; do
-  [[ -d "$REPO_ROOT/experiments/01_main_experiments/pi/$lang" ]] \
-    || fail "cell-setup: missing cell dir for $lang"
-done
+# Clean up the throwaway grid point.
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$AUDIT_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$AUDIT_PROVIDER"
 
 # ---------------------------------------------------------------------------
-# 3. driver: required --model flag
+# 3. driver: required --model and --provider flags
 # ---------------------------------------------------------------------------
 DRIVER_OUT="$("$PI_DIR/run_cell.sh" --language brainfuck 2>&1)"
 DRIVER_RC=$?
@@ -92,6 +100,13 @@ if [[ "$DRIVER_RC" -ne 0 ]] && echo "$DRIVER_OUT" | grep -q -- "--model"; then
   pass "driver: run_cell.sh without --model exits non-zero and names --model"
 else
   fail "driver: expected non-zero exit + '--model' in error, got rc=$DRIVER_RC: $DRIVER_OUT"
+fi
+DRIVER_OUT2="$("$PI_DIR/run_cell.sh" --model fake --language brainfuck 2>&1)"
+DRIVER_RC2=$?
+if [[ "$DRIVER_RC2" -ne 0 ]] && echo "$DRIVER_OUT2" | grep -q -- "--provider"; then
+  pass "driver: run_cell.sh without --provider exits non-zero and names --provider"
+else
+  fail "driver: expected non-zero exit + '--provider' in error, got rc=$DRIVER_RC2: $DRIVER_OUT2"
 fi
 
 # ---------------------------------------------------------------------------
@@ -118,6 +133,21 @@ else
   fail "driver-rebuild: expected heartbeat/stall-timeout/PI_BIN/process-group pieces missing from run_cell.sh"
 fi
 
+# grid-keying: --provider is required (not silently defaulted), --fresh
+# exists, and the cell path is resolved via setup_cells.py (single source of
+# truth), not recomputed independently.
+if grep -q -- '--provider) PROVIDER=' "$RUN_CELL" && grep -q -- '--fresh) FRESH=' "$RUN_CELL" \
+   && grep -q 'setup_cells.py' "$RUN_CELL" && grep -q 'CELL_DIR="\$(sed' "$RUN_CELL"; then
+  pass "grid-keying: run_cell.sh requires --provider, supports --fresh, and resolves the cell via setup_cells.py"
+else
+  fail "grid-keying: expected --provider/--fresh/setup_cells.py-resolution wiring missing from run_cell.sh"
+fi
+if grep -q 'required=True' "$PI_DIR/setup_cells.py" && grep -q 'def slug' "$PI_DIR/setup_cells.py"; then
+  pass "grid-keying: setup_cells.py requires provider/model and slugs the grid path"
+else
+  fail "grid-keying: setup_cells.py missing required-args/slugging for the grid path"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"
@@ -125,7 +155,7 @@ else
   TEST_OUT="$(bash "$TEST_RUN_CELL" 2>&1)"
   TEST_RC=$?
   if [[ "$TEST_RC" -eq 0 ]] && echo "$TEST_OUT" | grep -q 'TEST_RUN_CELL: ALL CHECKS PASSED'; then
-    pass "driver-rebuild: model-free integration test (heartbeat + max-problems stop + no orphaned process) passed"
+    pass "driver-rebuild: model-free integration test (heartbeat + max-problems stop + --fresh reset + no orphaned process) passed"
   else
     fail "driver-rebuild: integration test failed (rc=$TEST_RC)"
     echo "$TEST_OUT"
@@ -135,11 +165,19 @@ fi
 # ---------------------------------------------------------------------------
 # 4. smoke: live pi run artifact
 # ---------------------------------------------------------------------------
-# run_cell.sh copies the cell's export.json to pi/artifacts/<language>_export.json
-# after every run (any language qualifies as the smoke proof).
-SMOKE_EXPORT="$(ls "$PI_DIR"/artifacts/*_export.json 2>/dev/null | head -1)"
+# run_cell.sh copies the cell's export.json to
+# pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json after
+# every run. Search recursively (not a flat glob) since the grid-keying
+# change nests the artifact path -- any grid point's export qualifies as the
+# smoke proof. NOTE: this deliberately does NOT require re-running a live
+# model under the new --provider-required CLI: the underlying pi<->harness
+# interaction the smoke proves (a real model issuing real harness commands
+# and getting a real graded submission) is unchanged by relocating where the
+# artifact is written; the model-free integration test above is what proves
+# the NEW nested-path mechanics work.
+SMOKE_EXPORT="$(find "$PI_DIR/artifacts" -name '*_export.json' 2>/dev/null | head -1)"
 if [[ -z "$SMOKE_EXPORT" || ! -f "$SMOKE_EXPORT" ]]; then
-  fail "smoke: no pi/artifacts/<language>_export.json found -- run the live pi smoke test first (pi/run_cell.sh ...)"
+  fail "smoke: no *_export.json found under pi/artifacts/ -- run the live pi smoke test first (pi/run_cell.sh ...)"
 else
   "$PY" - "$SMOKE_EXPORT" <<'PYEOF'
 import json, sys
@@ -172,6 +210,12 @@ if [[ -f "$README" ]] \
 else
   fail "docs: pi/README.md missing or incomplete"
 fi
+if grep -q -- "--provider" "$README" && grep -q -- "--thinking" "$README" \
+   && grep -q -- "--fresh" "$README" && grep -qi "grid" "$README"; then
+  pass "docs: pi/README.md documents --provider/--thinking/--fresh and the grid layout"
+else
+  fail "docs: pi/README.md missing --provider/--thinking/--fresh or grid-layout documentation"
+fi
 if grep -q "pi/README.md" "$REPO_ROOT/HOWTO_RUN.md" 2>/dev/null; then
   pass "docs: HOWTO_RUN.md points to pi/README.md"
 else
@@ -198,6 +242,19 @@ elif ! git status --porcelain -- \
   pass "hygiene: local dataset + pi/artifacts are not tracked or staged"
 else
   fail "hygiene: local dataset or pi/artifacts appear tracked/staged in git status"
+fi
+
+# The on-demand grid-cell tree must not be tracked (it's regenerated locally
+# per provider/model/thinking/language, never committed).
+if git ls-files experiments/01_main_experiments/pi/ | grep -q .; then
+  fail "hygiene: experiments/01_main_experiments/pi/ still has tracked files (should be git-ignored, built on demand)"
+else
+  pass "hygiene: experiments/01_main_experiments/pi/ (on-demand grid cells) has no tracked files"
+fi
+if grep -q 'experiments/01_main_experiments/pi/' "$REPO_ROOT/.gitignore"; then
+  pass "hygiene: .gitignore covers the on-demand grid-cell tree"
+else
+  fail "hygiene: .gitignore does not cover experiments/01_main_experiments/pi/"
 fi
 
 echo

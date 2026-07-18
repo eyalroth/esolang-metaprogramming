@@ -1,1 +1,0 @@
-../../../../prompts/befunge98/AGENTS.md

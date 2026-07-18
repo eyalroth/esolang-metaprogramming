@@ -17,8 +17,8 @@ benchmark.
 | File | Purpose |
 |---|---|
 | `load_dataset.py` | Pulls the **real, unredacted** hidden tests from the `Lossfunk/Esolang-Bench` HuggingFace dataset and writes them to a git-ignored local file. **Never commit this file's output** — see Dataset below. |
-| `setup_cells.py` | Builds `experiments/01_main_experiments/pi/<language>/` cells (harness + `AGENTS.md` symlinks), mirroring `scripts/setup_main_grid.py`'s pattern but without a fixed model subdirectory. |
-| `run_cell.sh` | Headless driver: runs **one continuous `pi` session** through a cell to completion (methodology-faithful — no chunking). **`--model` is a required flag — omitting it is an error, by design**, so the model under test is always a deliberate choice, never a silent default. |
+| `setup_cells.py` | Builds ONE grid cell on demand — `experiments/01_main_experiments/pi/<provider>/<model>/<thinking>/<language>/` (harness + `AGENTS.md` symlinks) — keyed on the **full experimental grid**. Single source of truth for that path; `run_cell.sh` calls it, you normally never need to. |
+| `run_cell.sh` | Headless driver: runs **one continuous `pi` session** through a cell to completion (methodology-faithful — no chunking). **`--model` and `--provider` are required flags — omitting either is an error, by design**, so every run's grid coordinates are a deliberate choice, never a silent default. |
 | `audit.sh` | Deterministic, no-network, no-live-model-call check that everything above is wired correctly (used by the craft workflow that built this). |
 | `tests/` | Model-free integration test (`test_run_cell.sh` + a `fake_pi.sh` stand-in for the real `pi` CLI) exercising the driver's heartbeat/stall-watchdog/cleanup control flow with no network or model call. |
 | `artifacts/` | Git-ignored scratch space for run exports (e.g. smoke-test output). |
@@ -51,31 +51,41 @@ Output goes to `benchmark_harness/private/esolang_full_private.local.json` —
 commit the `.local.json` file or any other copy of the real hidden tests** —
 that would compromise the benchmark for everyone else.
 
-## 3. Build the pi cells
+## 3. Cells are built for you, on demand
+
+Unlike an earlier revision of this toolkit, you don't need a separate
+cell-building step: `run_cell.sh` calls `pi/setup_cells.py` itself for the
+exact grid point you're about to run. You can still pre-build one manually if
+you want to inspect the symlinks first:
 
 ```bash
-python3 pi/setup_cells.py
+python3 pi/setup_cells.py --provider anthropic --model claude-sonnet-4-6 --language brainfuck
 ```
-
-Builds one cell per language under
-`experiments/01_main_experiments/pi/<brainfuck|befunge-98|whitespace|shakespeare>/`.
-No per-model subdirectory — the model is a runtime flag to `run_cell.sh`, not
-part of the cell's identity, since what's under test is "pi as configured for
-this run," not one pinned checkpoint.
 
 ## 4. Run a cell
 
 ```bash
-pi/run_cell.sh --model <provider/model-id> --language brainfuck
+pi/run_cell.sh --model <model-id> --provider <provider-name> --language brainfuck
 ```
 
-`--model` is **required** — there is no default, and omitting it is a hard
-error (`pi/run_cell.sh --language brainfuck` alone exits non-zero naming
-`--model`). This is intentional: you must pick a model deliberately for every
-run, so the number you get is never accidentally attributed to the wrong
-model.
+`--model` and `--provider` are **both required** — there is no default for
+either, and omitting one is a hard error (`pi/run_cell.sh --language
+brainfuck` alone exits non-zero naming `--model`; adding `--model` but not
+`--provider` exits non-zero naming `--provider`). This is intentional: pi
+itself silently defaults `--provider` to `google` if you don't pass it, which
+is exactly the kind of silent-default footgun `--model` already guarded
+against here — so every run's grid coordinates are a deliberate choice, never
+accidentally attributed to the wrong provider or model.
 
 Optional flags:
+- `--thinking <level>` — pi's thinking level (`off`/`minimal`/`low`/`medium`/
+  `high`/`xhigh`). Omit to use the model's own default (labeled `default` in
+  the result path — see Result keying below).
+- `--fresh` — reset **this specific grid cell's** state
+  (`harness_state.json`, `export.json`, `.pi-sessions`) before running, so
+  re-running the same (provider, model, thinking, language) point starts
+  clean instead of resuming a prior run's leftover session/state. Without
+  it, re-running the same grid point **resumes** rather than restarts.
 - `--max-problems N` — an explicit **bounded-test stop**: terminate once N
   problems have been finalized (solved/failed/skipped). Useful for a quick
   smoke run instead of the full 80-problem grind. This is a deliberate,
@@ -92,6 +102,28 @@ Optional flags:
   inside one `run` call) never trips it.
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
+
+### Result keying: the full experimental grid
+
+Results (both the cell's `harness_state.json` and the exported artifact) are
+keyed on **every** dimension, so different providers/models/thinking levels
+run against the same language never collide or overwrite each other:
+
+```
+experiments/01_main_experiments/pi/<provider>/<model>/<thinking>/<language>/
+    harness.py, AGENTS.md (symlinks), harness_state.json, export.json
+
+pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json
+```
+
+`pi` (the whole top-level dir) is the **harness** dimension — a sibling of
+the paper's own `claude`/`codex`/`opencode` harness dirs. Provider, model,
+and thinking come from your `--provider`/`--model`/`--thinking` flags
+(sanitized into filesystem-safe path components); thinking defaults to the
+literal label `default` when omitted. Two models compared side by side, or
+the same model at two thinking levels, each get their own cell and artifact —
+nothing is silently overwritten. This whole tree is git-ignored and rebuilt
+locally (see `pi/setup_cells.py`).
 
 ### Methodology: one continuous session, not chunked turns
 
@@ -126,7 +158,7 @@ On exit (natural completion, a stall-kill, `--max-problems`, Ctrl-C, or a
 crash), the driver terminates the child pi's **entire process group** — not
 just its direct PID — so no grandchild process (e.g. one spawned by the
 model's own bash tool calls) survives as an orphan, and always writes
-`export.json` (+ the `pi/artifacts/<language>_export.json` copy) with
+`export.json` (+ the `pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json` copy) with
 whatever progress was made.
 
 ## Comparing to the paper

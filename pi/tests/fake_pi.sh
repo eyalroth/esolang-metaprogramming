@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --session-dir) SESSION_DIR="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID="${2:-}"; shift 2 ;;
-    --model|--tools) shift 2 ;;
+    --model|--tools|--provider|--thinking) shift 2 ;;
     -p|--print|-a) shift 1 ;;
     *) shift 1 ;;
   esac

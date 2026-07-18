@@ -21,14 +21,22 @@
 # goes genuinely quiet for that long (a real hang), never on elapsed time.
 #
 # Usage:
-#   pi/run_cell.sh --model <id> --language <lang> [options]
+#   pi/run_cell.sh --model <id> --provider <name> --language <lang> [options]
 #
-# --model is REQUIRED. There is no default -- an omitted --model is an error,
-# by design (the operator picks the model deliberately per run).
+# --model and --provider are REQUIRED. There is no default for either -- pi
+# itself silently defaults --provider to "google" if omitted, which is
+# exactly the kind of silent-default footgun --model already guards against
+# here, so --provider is gated the same way.
 #
-# Requires (in order):
-#   1. pi/load_dataset.py has been run (real dataset present, see --dataset-file).
-#   2. pi/setup_cells.py has been run (cell dir with harness.py + AGENTS.md symlinks exists).
+# RESULTS ARE KEYED ON THE FULL GRID: harness (this pi/ dir itself) x
+# provider x model x thinking x language. Every combination gets its own cell
+# + its own export artifact -- two different providers/models/thinking
+# levels run against the same language never collide or overwrite each
+# other's results (see pi/setup_cells.py, the single source of truth for the
+# grid path). Cells are built ON DEMAND by this script (via setup_cells.py) --
+# there's no separate pre-build step required.
+#
+# Requires: pi/load_dataset.py has been run (real dataset present, see --dataset-file).
 #
 # SAFETY (learned the hard way):
 #   - The child `pi` is a SEPARATE process/session from whatever pi session
@@ -54,7 +62,10 @@ REPO_ROOT="$(cd "$PI_DIR/.." && pwd)"
 PI_BIN="${PI_BIN:-pi}"  # override for testing: PI_BIN=/path/to/fake_pi.sh
 
 MODEL=""
+PROVIDER=""
 LANGUAGE=""
+THINKING=""
+FRESH=""
 MAX_PROBLEMS=""
 MAX_CONTINUATIONS=3
 HEARTBEAT_INTERVAL=15
@@ -66,14 +77,25 @@ ALLOWED_TOOLS="read,bash,edit,write"
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 --model <id> --language <brainfuck|befunge-98|whitespace|shakespeare> [options]
+Usage: $0 --model <id> --provider <name> --language <brainfuck|befunge-98|whitespace|shakespeare> [options]
 
 Required:
-  --model <id>            Model id/pattern to pass to pi (e.g. anthropic/claude-sonnet-4-6).
+  --model <id>            Model id to pass to pi (e.g. claude-sonnet-4-6).
                            REQUIRED -- there is no default, this errors out if omitted.
+  --provider <name>        pi provider name (e.g. anthropic, openai, google).
+                           REQUIRED -- pi itself defaults this to "google" silently, which
+                           this driver deliberately refuses to inherit; this errors out if
+                           omitted, same as --model.
   --language <lang>       One of: brainfuck, befunge-98, whitespace, shakespeare
 
 Options:
+  --thinking <level>      pi thinking level: off, minimal, low, medium, high, xhigh.
+                           Omit to use the model's own default (labeled "default" in the
+                           result path/artifact -- see Result keying below).
+  --fresh                 Reset THIS grid cell's state (harness_state.json, export.json,
+                           .pi-sessions) before running -- use to cleanly re-run the same
+                           (provider, model, thinking, language) point instead of resuming
+                           a prior run's leftover state.
   --max-problems N        Stop once N problems have been finalized (solved/failed/skipped)
                            -- an explicit bounded-test stop; default: unset = run to all 80.
   --max-continuations N   Cap on early-yield re-nudges: if the single pi session ends
@@ -95,6 +117,12 @@ Options:
   --allowed-tools LIST    Comma-separated pi --tools allowlist for the child
                            (default: $ALLOWED_TOOLS -- deliberately excludes
                            craft_*/initiative_*/bench/ask_user_question/mcp).
+
+Result keying: state + the export artifact are keyed on the FULL grid --
+harness (this pi/ dir) x provider x model x thinking x language -- at
+experiments/01_main_experiments/pi/<provider>/<model>/<thinking>/<language>/
+and pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json. See
+pi/setup_cells.py.
 EOF
   exit 1
 }
@@ -102,7 +130,10 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="${2:-}"; shift 2 ;;
+    --provider) PROVIDER="${2:-}"; shift 2 ;;
     --language) LANGUAGE="${2:-}"; shift 2 ;;
+    --thinking) THINKING="${2:-}"; shift 2 ;;
+    --fresh) FRESH=1; shift 1 ;;
     --max-problems) MAX_PROBLEMS="${2:-}"; shift 2 ;;
     --max-continuations) MAX_CONTINUATIONS="${2:-}"; shift 2 ;;
     --heartbeat-interval) HEARTBEAT_INTERVAL="${2:-}"; shift 2 ;;
@@ -119,14 +150,12 @@ if [[ -z "$MODEL" ]]; then
   echo "ERROR: --model is required (no default is provided by design)." >&2
   exit 1
 fi
-if [[ -z "$LANGUAGE" ]]; then
-  echo "ERROR: --language is required." >&2
+if [[ -z "$PROVIDER" ]]; then
+  echo "ERROR: --provider is required (pi silently defaults this to 'google' -- this driver refuses to inherit that; no default is provided by design)." >&2
   exit 1
 fi
-
-CELL_DIR="$REPO_ROOT/experiments/01_main_experiments/pi/$LANGUAGE"
-if [[ ! -d "$CELL_DIR" ]]; then
-  echo "ERROR: cell not found at $CELL_DIR -- run: python3 pi/setup_cells.py" >&2
+if [[ -z "$LANGUAGE" ]]; then
+  echo "ERROR: --language is required." >&2
   exit 1
 fi
 if [[ ! -f "$DATASET_FILE" ]]; then
@@ -134,8 +163,31 @@ if [[ ! -f "$DATASET_FILE" ]]; then
   exit 1
 fi
 
+# Resolve (and build, on demand) the grid cell via setup_cells.py -- the
+# single source of truth for the path, so run_cell.sh never recomputes it
+# independently and risks drifting from what setup_cells.py itself builds.
+SETUP_ARGS=(--provider "$PROVIDER" --model "$MODEL" --language "$LANGUAGE")
+[[ -n "$THINKING" ]] && SETUP_ARGS+=(--thinking "$THINKING")
+if ! SETUP_OUT="$(python3 "$PI_DIR/setup_cells.py" "${SETUP_ARGS[@]}")"; then
+  echo "$SETUP_OUT" >&2
+  exit 1
+fi
+CELL_DIR="$(sed -n 's/^CELL_DIR=//p' <<<"$SETUP_OUT")"
+ARTIFACT_PATH="$(sed -n 's/^ARTIFACT=//p' <<<"$SETUP_OUT")"
+if [[ -z "$CELL_DIR" || -z "$ARTIFACT_PATH" ]]; then
+  echo "ERROR: failed to resolve the grid cell path via setup_cells.py:" >&2
+  echo "$SETUP_OUT" >&2
+  exit 1
+fi
+
 cd "$CELL_DIR"
 export HARNESS_PRIVATE_FILE="$DATASET_FILE"
+
+if [[ -n "$FRESH" ]]; then
+  echo "[run_cell] --fresh: resetting this grid cell's state ($CELL_DIR)"
+  rm -f harness_state.json export.json
+  rm -rf .pi-sessions
+fi
 
 if [[ ! -f harness_state.json ]]; then
   echo "[run_cell] initializing harness session for $LANGUAGE"
@@ -199,9 +251,8 @@ finalize_export() {
   [[ "$EXPORTED" -eq 1 ]] && return 0
   EXPORTED=1
   python3 harness.py export || true
-  local artifacts_dir="$PI_DIR/artifacts"
-  mkdir -p "$artifacts_dir"
-  [[ -f "$CELL_DIR/export.json" ]] && cp "$CELL_DIR/export.json" "$artifacts_dir/${LANGUAGE}_export.json"
+  mkdir -p "$(dirname "$ARTIFACT_PATH")"
+  [[ -f "$CELL_DIR/export.json" ]] && cp "$CELL_DIR/export.json" "$ARTIFACT_PATH"
 }
 
 cleanup() {
@@ -239,8 +290,10 @@ while (( attempt <= max_attempts )); do
     echo "[run_cell] early-yield re-nudge (attempt $attempt/$max_attempts)"
   fi
 
-  "$PI_BIN" -p --model "$MODEL" --session-dir "$SESSION_DIR" --session-id "$SESSION_ID" \
-    --tools "$ALLOWED_TOOLS" -a "$PROMPT" > "$RUN_LOG" 2>&1 &
+  PI_ARGS=(-p --model "$MODEL" --provider "$PROVIDER" --session-dir "$SESSION_DIR" \
+            --session-id "$SESSION_ID" --tools "$ALLOWED_TOOLS" -a "$PROMPT")
+  [[ -n "$THINKING" ]] && PI_ARGS+=(--thinking "$THINKING")
+  "$PI_BIN" "${PI_ARGS[@]}" > "$RUN_LOG" 2>&1 &
   PI_PID=$!
   PI_PGID="$(ps -o pgid= -p "$PI_PID" 2>/dev/null | tr -d ' ')"
 
@@ -315,7 +368,7 @@ echo "[run_cell] done (reason: ${STOP_REASON:-unknown}) -- solved=${ST_SOLVED}/8
 # `finalize_export` + `kill_child_group` also run via the EXIT trap, but call
 # explicitly here too so the printed path is accurate before the trap fires.
 finalize_export
-echo "[run_cell] export written to $CELL_DIR/export.json (and copied to $PI_DIR/artifacts/${LANGUAGE}_export.json)"
+echo "[run_cell] export written to $CELL_DIR/export.json (and copied to $ARTIFACT_PATH)"
 
 case "$STOP_REASON" in
   completed|max_problems) exit 0 ;;
