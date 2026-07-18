@@ -59,28 +59,36 @@ exact grid point you're about to run. You can still pre-build one manually if
 you want to inspect the symlinks first:
 
 ```bash
-python3 pi/setup_cells.py --provider anthropic --model claude-sonnet-4-6 --language brainfuck
+python3 pi/setup_cells.py --provider anthropic --model claude-sonnet-4-6 --thinking low --language brainfuck
 ```
 
 ## 4. Run a cell
 
 ```bash
-pi/run_cell.sh --model <model-id> --provider <provider-name> --language brainfuck
+pi/run_cell.sh --model <model-id> --provider <provider-name> --thinking <level> --language brainfuck
 ```
 
-`--model` and `--provider` are **both required** — there is no default for
-either, and omitting one is a hard error (`pi/run_cell.sh --language
-brainfuck` alone exits non-zero naming `--model`; adding `--model` but not
-`--provider` exits non-zero naming `--provider`). This is intentional: pi
-itself silently defaults `--provider` to `google` if you don't pass it, which
-is exactly the kind of silent-default footgun `--model` already guarded
-against here — so every run's grid coordinates are a deliberate choice, never
-accidentally attributed to the wrong provider or model.
+`--model`, `--provider`, and `--thinking` are **all three required** — there
+is no default for any of them, and omitting one is a hard error
+(`pi/run_cell.sh --language brainfuck` alone exits non-zero naming `--model`;
+adding `--model` but not `--provider` exits non-zero naming `--provider`;
+adding both but not `--thinking` exits non-zero naming `--thinking`). This is
+intentional: pi itself silently defaults `--provider` to `google` if you
+don't pass it (the same silent-default footgun `--model` already guarded
+against), and thinking level materially changes both behavior and cost — so
+none of a run's grid coordinates are ever assumed, only chosen deliberately.
+`--thinking` must be one of pi's own recognized levels (`off`/`minimal`/
+`low`/`medium`/`high`/`xhigh`) — an unrecognized value is also a hard error.
+
+**`--model`/`--provider` are also verified to actually exist before anything
+runs**: `run_cell.sh` checks `<provider>/<model>` against an exact row in `pi
+--list-models` and refuses to start if it's not there. This exists because pi
+itself fuzzy-matches `--model` and silently falls back to a different model
+on a typo — exactly the kind of silent misattribution this toolkit is built
+to avoid; a bad id is now a hard error naming the model, not a quietly wrong
+result.
 
 Optional flags:
-- `--thinking <level>` — pi's thinking level (`off`/`minimal`/`low`/`medium`/
-  `high`/`xhigh`). Omit to use the model's own default (labeled `default` in
-  the result path — see Result keying below).
 - `--fresh` — reset **this specific grid cell's** state
   (`harness_state.json`, `export.json`, `.pi-sessions`) before running, so
   re-running the same (provider, model, thinking, language) point starts
@@ -118,12 +126,11 @@ pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json
 
 `pi` (the whole top-level dir) is the **harness** dimension — a sibling of
 the paper's own `claude`/`codex`/`opencode` harness dirs. Provider, model,
-and thinking come from your `--provider`/`--model`/`--thinking` flags
-(sanitized into filesystem-safe path components); thinking defaults to the
-literal label `default` when omitted. Two models compared side by side, or
-the same model at two thinking levels, each get their own cell and artifact —
-nothing is silently overwritten. This whole tree is git-ignored and rebuilt
-locally (see `pi/setup_cells.py`).
+and thinking all come from your (all-required) `--provider`/`--model`/
+`--thinking` flags, sanitized into filesystem-safe path components. Two
+models compared side by side, or the same model at two thinking levels, each
+get their own cell and artifact — nothing is silently overwritten. This
+whole tree is git-ignored and rebuilt locally (see `pi/setup_cells.py`).
 
 ### Methodology: one continuous session, not chunked turns
 
@@ -164,7 +171,7 @@ whatever progress was made.
 ## Comparing to the paper
 
 To make a run comparable to a specific paper row (e.g. `claude_code/sonnet_4_6`),
-pass the matching `--model`. The harness protocol (80 problems, max 3
+pass the matching `--model`/`--provider`/`--thinking`. The harness protocol (80 problems, max 3
 submissions each, unlimited local `run`) is identical to every other wrapper
 in the repo — only the agent driving it changes.
 

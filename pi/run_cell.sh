@@ -86,12 +86,13 @@ Required:
                            REQUIRED -- pi itself defaults this to "google" silently, which
                            this driver deliberately refuses to inherit; this errors out if
                            omitted, same as --model.
+  --thinking <level>      pi thinking level: off, minimal, low, medium, high, xhigh.
+                           REQUIRED -- thinking materially changes behavior/cost, so like
+                           --model/--provider it is never silently assumed; this errors out
+                           if omitted or set to an unrecognized level.
   --language <lang>       One of: brainfuck, befunge-98, whitespace, shakespeare
 
 Options:
-  --thinking <level>      pi thinking level: off, minimal, low, medium, high, xhigh.
-                           Omit to use the model's own default (labeled "default" in the
-                           result path/artifact -- see Result keying below).
   --fresh                 Reset THIS grid cell's state (harness_state.json, export.json,
                            .pi-sessions) before running -- use to cleanly re-run the same
                            (provider, model, thinking, language) point instead of resuming
@@ -154,6 +155,17 @@ if [[ -z "$PROVIDER" ]]; then
   echo "ERROR: --provider is required (pi silently defaults this to 'google' -- this driver refuses to inherit that; no default is provided by design)." >&2
   exit 1
 fi
+if [[ -z "$THINKING" ]]; then
+  echo "ERROR: --thinking is required (thinking materially changes behavior/cost, so like --model/--provider it is never silently assumed; no default is provided by design)." >&2
+  exit 1
+fi
+case "$THINKING" in
+  off|minimal|low|medium|high|xhigh) ;;
+  *)
+    echo "ERROR: --thinking '$THINKING' is not a recognized level. Must be one of: off, minimal, low, medium, high, xhigh." >&2
+    exit 1
+    ;;
+esac
 if [[ -z "$LANGUAGE" ]]; then
   echo "ERROR: --language is required." >&2
   exit 1
@@ -163,11 +175,27 @@ if [[ ! -f "$DATASET_FILE" ]]; then
   exit 1
 fi
 
+# Pre-flight: refuse an unresolvable (provider, model) pair rather than
+# letting pi silently fuzzy-match/fall back to some other model. `pi
+# --list-models` prints an exact "provider  model  ..." table; require an
+# EXACT "$PROVIDER/$MODEL" row in it (works against the real pi CLI and
+# against a PI_BIN stub that implements --list-models for testing).
+MODEL_LIST="$("$PI_BIN" --list-models 2>&1)"
+MODEL_LIST_RC=$?
+if [[ "$MODEL_LIST_RC" -ne 0 ]]; then
+  echo "ERROR: '$PI_BIN --list-models' failed (rc=$MODEL_LIST_RC) -- cannot verify --provider/--model exist:" >&2
+  echo "$MODEL_LIST" >&2
+  exit 1
+fi
+if ! awk -v want="$PROVIDER/$MODEL" 'NF>=2 && ($1"/"$2)==want{found=1} END{exit !found}' <<<"$MODEL_LIST"; then
+  echo "ERROR: no model '$MODEL' under provider '$PROVIDER' found in '$PI_BIN --list-models' -- refusing to run (a typo would otherwise silently fall back to some other model). Run '$PI_BIN --list-models' to see valid provider/model pairs." >&2
+  exit 1
+fi
+
 # Resolve (and build, on demand) the grid cell via setup_cells.py -- the
 # single source of truth for the path, so run_cell.sh never recomputes it
 # independently and risks drifting from what setup_cells.py itself builds.
-SETUP_ARGS=(--provider "$PROVIDER" --model "$MODEL" --language "$LANGUAGE")
-[[ -n "$THINKING" ]] && SETUP_ARGS+=(--thinking "$THINKING")
+SETUP_ARGS=(--provider "$PROVIDER" --model "$MODEL" --thinking "$THINKING" --language "$LANGUAGE")
 if ! SETUP_OUT="$(python3 "$PI_DIR/setup_cells.py" "${SETUP_ARGS[@]}")"; then
   echo "$SETUP_OUT" >&2
   exit 1
@@ -290,9 +318,8 @@ while (( attempt <= max_attempts )); do
     echo "[run_cell] early-yield re-nudge (attempt $attempt/$max_attempts)"
   fi
 
-  PI_ARGS=(-p --model "$MODEL" --provider "$PROVIDER" --session-dir "$SESSION_DIR" \
+  PI_ARGS=(-p --model "$MODEL" --provider "$PROVIDER" --thinking "$THINKING" --session-dir "$SESSION_DIR" \
             --session-id "$SESSION_ID" --tools "$ALLOWED_TOOLS" -a "$PROMPT")
-  [[ -n "$THINKING" ]] && PI_ARGS+=(--thinking "$THINKING")
   "$PI_BIN" "${PI_ARGS[@]}" > "$RUN_LOG" 2>&1 &
   PI_PID=$!
   PI_PGID="$(ps -o pgid= -p "$PI_PID" 2>/dev/null | tr -d ' ')"

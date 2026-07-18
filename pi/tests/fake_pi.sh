@@ -12,12 +12,21 @@
 # fetch+submit cycles (submissions are garbage -- WRONG ANSWER is fine, the
 # point is to finalize problems and generate real submissions, not to solve
 # them).
+#
+# Also stands in for `pi --list-models`, since run_cell.sh's model-existence
+# pre-flight calls `$PI_BIN --list-models` and requires an exact
+# "provider/model" row -- set FAKE_PI_MODELS (space-separated
+# "provider/model" pairs) to control which pairs this stub reports as
+# existing; defaults to test-provider-s1/fake-model and
+# test-provider-s2/fake-model (the pairs the test scenarios use).
 set -uo pipefail
 
 SESSION_DIR=""
 SESSION_ID=""
+LIST_MODELS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --list-models) LIST_MODELS=1; shift 1 ;;
     --session-dir) SESSION_DIR="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID="${2:-}"; shift 2 ;;
     --model|--tools|--provider|--thinking) shift 2 ;;
@@ -25,6 +34,14 @@ while [[ $# -gt 0 ]]; do
     *) shift 1 ;;
   esac
 done
+
+if [[ -n "$LIST_MODELS" ]]; then
+  echo "provider        model"
+  for pair in ${FAKE_PI_MODELS:-test-provider-s1/fake-model test-provider-s2/fake-model}; do
+    printf '%s\t%s\n' "${pair%%/*}" "${pair#*/}"
+  done
+  exit 0
+fi
 
 if [[ -z "$SESSION_DIR" || -z "$SESSION_ID" ]]; then
   echo "fake_pi.sh: missing --session-dir/--session-id" >&2

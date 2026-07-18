@@ -75,7 +75,7 @@ fi
 # ---------------------------------------------------------------------------
 AUDIT_PROVIDER="_audit_provider"
 AUDIT_MODEL="_audit_model"
-SETUP_OUT="$("$PY" "$PI_DIR/setup_cells.py" --provider "$AUDIT_PROVIDER" --model "$AUDIT_MODEL" --language brainfuck 2>&1)"
+SETUP_OUT="$("$PY" "$PI_DIR/setup_cells.py" --provider "$AUDIT_PROVIDER" --model "$AUDIT_MODEL" --thinking low --language brainfuck 2>&1)"
 SETUP_RC=$?
 AUDIT_CELL="$(sed -n 's/^CELL_DIR=//p' <<<"$SETUP_OUT" | tail -1)"
 if [[ "$SETUP_RC" -eq 0 && -n "$AUDIT_CELL" \
@@ -107,6 +107,20 @@ if [[ "$DRIVER_RC2" -ne 0 ]] && echo "$DRIVER_OUT2" | grep -q -- "--provider"; t
   pass "driver: run_cell.sh without --provider exits non-zero and names --provider"
 else
   fail "driver: expected non-zero exit + '--provider' in error, got rc=$DRIVER_RC2: $DRIVER_OUT2"
+fi
+DRIVER_OUT3="$("$PI_DIR/run_cell.sh" --model fake --provider fake --language brainfuck 2>&1)"
+DRIVER_RC3=$?
+if [[ "$DRIVER_RC3" -ne 0 ]] && echo "$DRIVER_OUT3" | grep -q -- "--thinking"; then
+  pass "driver: run_cell.sh without --thinking exits non-zero and names --thinking"
+else
+  fail "driver: expected non-zero exit + '--thinking' in error, got rc=$DRIVER_RC3: $DRIVER_OUT3"
+fi
+DRIVER_OUT4="$("$PI_DIR/run_cell.sh" --model fake --provider fake --thinking bogus-level --language brainfuck 2>&1)"
+DRIVER_RC4=$?
+if [[ "$DRIVER_RC4" -ne 0 ]] && echo "$DRIVER_OUT4" | grep -q "not a recognized level"; then
+  pass "driver: run_cell.sh rejects an unrecognized --thinking value"
+else
+  fail "driver: expected non-zero exit + 'not a recognized level' in error, got rc=$DRIVER_RC4: $DRIVER_OUT4"
 fi
 
 # ---------------------------------------------------------------------------
@@ -146,6 +160,21 @@ if grep -q 'required=True' "$PI_DIR/setup_cells.py" && grep -q 'def slug' "$PI_D
   pass "grid-keying: setup_cells.py requires provider/model and slugs the grid path"
 else
   fail "grid-keying: setup_cells.py missing required-args/slugging for the grid path"
+fi
+# thinking is required with no assumed default (same treatment as model/provider).
+if grep -q -- '--thinking) THINKING=' "$RUN_CELL" && grep -qi 'thinking is required' "$RUN_CELL" \
+   && grep -q 'off|minimal|low|medium|high|xhigh' "$RUN_CELL" \
+   && grep -q '"--thinking", required=True' "$PI_DIR/setup_cells.py"; then
+  pass "grid-keying: --thinking is required (no default) and validated against pi's known levels"
+else
+  fail "grid-keying: --thinking is not fully required/validated across run_cell.sh + setup_cells.py"
+fi
+# model-existence pre-flight: refuse an unresolvable (provider, model) pair
+# instead of letting pi silently fuzzy-match/fall back to a different model.
+if grep -q -- '--list-models' "$RUN_CELL" && grep -qi 'refusing to run' "$RUN_CELL"; then
+  pass "grid-keying: run_cell.sh pre-flights --provider/--model against '\$PI_BIN --list-models' and refuses an unresolvable pair"
+else
+  fail "grid-keying: expected a model-existence pre-flight (--list-models) missing from run_cell.sh"
 fi
 
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"

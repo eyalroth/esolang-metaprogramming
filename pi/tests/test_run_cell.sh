@@ -58,6 +58,7 @@ rm -f "$S1_ARTIFACT"
 
 RUN_OUT="$(mktemp)"
 PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=15 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S1_PROVIDER/$S1_MODEL" \
   "$PI_DIR/run_cell.sh" --model "$S1_MODEL" --provider "$S1_PROVIDER" --thinking "$S1_THINKING" \
     --language "$LANGUAGE" --max-problems 2 --heartbeat-interval 1 --stall-timeout 60 \
     --dataset-file "$REDACTED_DATASET" > "$RUN_OUT" 2>&1
@@ -149,6 +150,7 @@ print(sum(len(p['submissions']) for p in d['problems'].values()))
 
 FRESH_OUT="$(mktemp)"
 PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=1 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S2_PROVIDER/$S2_MODEL" \
   "$PI_DIR/run_cell.sh" --model "$S2_MODEL" --provider "$S2_PROVIDER" --thinking "$S2_THINKING" \
     --language "$LANGUAGE" --fresh --max-continuations 0 --heartbeat-interval 1 --stall-timeout 60 \
     --dataset-file "$REDACTED_DATASET" > "$FRESH_OUT" 2>&1
@@ -183,6 +185,44 @@ rm -f "$S2_ARTIFACT"
 rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S2_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S2_PROVIDER"
 rm -f "$FRESH_OUT"
+
+# ===========================================================================
+# Scenario 3: a nonexistent model is REJECTED, not silently run.
+# ===========================================================================
+echo
+echo "--- scenario 3: nonexistent model is rejected ---"
+
+S3_PROVIDER="test-provider-s3"
+S3_REAL_MODEL="fake-model"
+S3_BOGUS_MODEL="this-model-does-not-exist-xyz"
+S3_THINKING="low"
+
+BOGUS_OUT="$(mktemp)"
+# FAKE_PI_MODELS only advertises S3_REAL_MODEL -- S3_BOGUS_MODEL must NOT
+# resolve, so run_cell.sh's pre-flight must refuse to run at all (no cell
+# should even get built).
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_MODELS="$S3_PROVIDER/$S3_REAL_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S3_BOGUS_MODEL" --provider "$S3_PROVIDER" --thinking "$S3_THINKING" \
+    --language "$LANGUAGE" --dataset-file "$REDACTED_DATASET" > "$BOGUS_OUT" 2>&1
+BOGUS_RC=$?
+
+if [[ "$BOGUS_RC" -ne 0 ]] && grep -q "$S3_BOGUS_MODEL" "$BOGUS_OUT"; then
+  pass "scenario 3: run_cell.sh rejects a nonexistent model (exit $BOGUS_RC, error names the bad model)"
+else
+  fail "scenario 3: expected non-zero exit + the bogus model named in the error, got rc=$BOGUS_RC"
+  cat "$BOGUS_OUT"
+fi
+
+S3_CELL_DIR_IF_BUILT="$REPO_ROOT/experiments/01_main_experiments/pi/$S3_PROVIDER/$S3_BOGUS_MODEL/$S3_THINKING/$LANGUAGE"
+if [[ -e "$S3_CELL_DIR_IF_BUILT" ]]; then
+  fail "scenario 3: a cell was built for the rejected model at $S3_CELL_DIR_IF_BUILT -- the pre-flight must reject BEFORE building anything"
+else
+  pass "scenario 3: no cell was built for the rejected model (pre-flight ran before any cell/setup work)"
+fi
+
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S3_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S3_PROVIDER"
+rm -f "$BOGUS_OUT"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

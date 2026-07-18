@@ -19,7 +19,11 @@ This script is the SINGLE SOURCE OF TRUTH for that path: run_cell.sh calls it
 already correct); cells are built on demand, not pre-baked into the repo.
 
 Usage:
-    python3 pi/setup_cells.py --provider <p> --model <m> [--thinking <t>] [--language <lang>]
+    python3 pi/setup_cells.py --provider <p> --model <m> --thinking <t> [--language <lang>]
+
+--provider, --model, and --thinking are all REQUIRED -- no dimension of the
+grid is silently assumed/defaulted (thinking materially changes behavior and
+cost, so it gets the same treatment as provider/model).
 
 If --language is omitted, builds all 4 language cells for that
 provider/model/thinking triple (a convenience for pre-building a whole grid
@@ -40,8 +44,6 @@ EXPT_ROOT = REPO_ROOT / "experiments" / "01_main_experiments" / "pi"
 HARNESS_PATH = (REPO_ROOT / "benchmark_harness" / "harness.py").resolve()
 PROMPTS_DIR = REPO_ROOT / "prompts"
 ARTIFACTS_ROOT = PI_DIR / "artifacts"
-
-DEFAULT_THINKING_LABEL = "default"
 
 # (cell_dirname, prompts_subdir) -- cell_dirname matches --language values
 # used elsewhere in the repo; prompts_subdir matches the actual prompts/ tree
@@ -95,10 +97,10 @@ def build_one(provider: str, model: str, thinking: str, lang_dirname: str) -> Pa
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--provider", required=True, help="pi provider name (e.g. anthropic) -- required, no default")
-    ap.add_argument("--model", required=True, help="pi model id")
-    ap.add_argument("--thinking", default=DEFAULT_THINKING_LABEL,
-                     help=f"pi thinking level (off/minimal/low/medium/high/xhigh); "
-                          f"omit to use the model's own default (labeled '{DEFAULT_THINKING_LABEL}' in the path)")
+    ap.add_argument("--model", required=True, help="pi model id -- required, no default")
+    ap.add_argument("--thinking", required=True,
+                     help="pi thinking level (off/minimal/low/medium/high/xhigh) -- required, no default "
+                          "(thinking materially changes behavior/cost, so it's never silently assumed)")
     ap.add_argument("--language", choices=LANG_DIRNAMES, help="omit to build all 4 languages")
     args = ap.parse_args()
 
