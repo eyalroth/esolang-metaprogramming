@@ -133,6 +133,11 @@ Optional flags:
 - `--effective-model-wait S` (default 20) — seconds to wait for the child to
   report the model/provider/thinking it actually booted before giving up
   and aborting (see the effective-model verification note above).
+- `--effective-model-settle S` (default 2) — seconds the last-seen effective
+  model/thinking must stay unchanged before it's trusted. Guards against
+  reading only the FIRST (boot) `model_change` event and missing a silent
+  override that lands a moment later (the real bug: two `model_change`
+  events ~130ms apart, the second one wrong).
 
 ### Result keying: the full experimental grid
 
