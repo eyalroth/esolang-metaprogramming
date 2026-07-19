@@ -121,7 +121,12 @@ Options:
                            at the old 240s default. Raise this further for a very strong model
                            at high/xhigh thinking on the Hard/Extra-hard tiers if you see
                            another false stall; lower it only for a fast/no-thinking model
-                           where you want quicker true-hang detection.
+                           where you want quicker true-hang detection. RESUMING an existing
+                           cell (no --fresh) is safe across an arbitrary gap between runs
+                           (including a laptop suspend): the liveness clock is baselined from
+                           when THIS run started watching, never from the session file's own
+                           (possibly old) mtime, and a monitor-loop iteration gap far past its
+                           poll cadence (a suspend) is not counted as inactivity either.
   --dataset-file PATH     Private JSON to use as HARNESS_PRIVATE_FILE
                            (default: benchmark_harness/private/esolang_full_private.local.json)
   --session-id ID         pi session id for the child (default:
@@ -549,20 +554,47 @@ while (( attempt <= max_attempts )); do
   fi
 
   last_heartbeat=0
-  start_ts=$(date +%s)
+  # Liveness baseline: we track "seconds since we last OBSERVED the session
+  # file change" -- never the file's own absolute mtime. A RESUME's file
+  # already carries the PRIOR run's mtime (legitimately old), so trusting it
+  # directly would insta-kill a freshly-launched child before it writes a
+  # byte (real bug, hit in practice: a resumed run was killed on its very
+  # first heartbeat with "last activity 6543s ago" because the machine had
+  # slept between runs -- the file was just old, the child hadn't even
+  # booted yet). prev_mtime/prev_size start empty so the FIRST observation
+  # always counts as "just changed", seeding last_activity_ts=now and
+  # giving the child a full, fresh --stall-timeout window regardless of how
+  # old the pre-existing file is.
+  last_activity_ts=$(date +%s)
+  prev_loop_ts=$last_activity_ts
+  prev_mtime=""
+  prev_size=""
+  # If a monitor-loop iteration gap far exceeds its own ~$POLL_INTERVAL(2)s
+  # poll cadence, THIS PROCESS (and therefore the child) was almost
+  # certainly frozen by a machine suspend, not genuinely idle for that long
+  # -- don't count the frozen wall-clock time against the child either.
+  SUSPEND_GAP_THRESHOLD=30
 
   while kill -0 "$PI_PID" 2>/dev/null; do
     now=$(date +%s)
-    read -r live_mtime live_size < <(session_liveness)
-    if [[ "$live_mtime" == "0" ]]; then
-      idle=$(( now - start_ts ))
-    else
-      idle=$(( now - live_mtime ))
+    loop_gap=$(( now - prev_loop_ts ))
+    prev_loop_ts=$now
+    if (( loop_gap >= SUSPEND_GAP_THRESHOLD )); then
+      echo "[run_cell] detected a ${loop_gap}s gap since the last liveness check (>= ${SUSPEND_GAP_THRESHOLD}s) -- likely this machine was suspended, not that the child hung. Resetting the liveness clock rather than counting the frozen wall-time as inactivity."
+      last_activity_ts=$now
     fi
+
+    read -r live_mtime live_size < <(session_liveness)
+    if [[ "$live_mtime" != "$prev_mtime" || "$live_size" != "$prev_size" ]]; then
+      last_activity_ts=$now
+      prev_mtime="$live_mtime"
+      prev_size="$live_size"
+    fi
+    idle=$(( now - last_activity_ts ))
 
     if (( now - last_heartbeat >= HEARTBEAT_INTERVAL )); then
       harness_status
-      echo "[run_cell] heartbeat -- solved=${ST_SOLVED}/80 failed=${ST_FAILED} skipped=${ST_SKIPPED} active=${ST_ACTIVE} remaining=${ST_REMAINING} current=${ST_CURRENT:-none} tests=${ST_TESTS:-0/0} | session +${live_size}B, last activity ${idle}s ago"
+      echo "[run_cell] heartbeat -- solved=${ST_SOLVED}/80 failed=${ST_FAILED} skipped=${ST_SKIPPED} active=${ST_ACTIVE} remaining=${ST_REMAINING} current=${ST_CURRENT:-none} tests=${ST_TESTS:-0/0} | session size=${live_size}B, last activity ${idle}s ago"
       last_heartbeat=$now
     fi
 

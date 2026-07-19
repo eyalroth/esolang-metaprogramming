@@ -39,6 +39,13 @@
 # idles (FAKE_PI_CORRUPT_IDLE, default 30s) -- exercising run_cell.sh's
 # heartbeat resilience (retry + keep last-known ST_* values + no leaked
 # Python traceback) against a state file that's persistently unreadable.
+#
+# Set FAKE_PI_STARTUP_DELAY (seconds) to simulate a RESUMED run's real
+# startup race: this stub writes NOTHING (no boot event) for that many
+# seconds -- exercising run_cell.sh's liveness baseline against a
+# pre-existing, test-seeded session file that already carries an OLD mtime
+# (the real bug: a resume's stall watchdog trusted that old mtime directly
+# and killed the child before it ever got to write).
 set -uo pipefail
 
 SESSION_DIR=""
@@ -75,6 +82,17 @@ if [[ -z "$SESSION_DIR" || -z "$SESSION_ID" ]]; then
 fi
 mkdir -p "$SESSION_DIR"
 SESSION_FILE="$SESSION_DIR/${SESSION_ID}.jsonl"
+
+# Set FAKE_PI_STARTUP_DELAY to simulate a RESUMED run's real startup race:
+# the child doesn't write anything for this many seconds (no boot event of
+# its own yet), so any effective-model verification / liveness reading
+# during that window sees ONLY whatever the test pre-seeded into
+# SESSION_FILE beforehand (mirroring the real world, where a resume's
+# verification legitimately reads the PRIOR run's still-present boot event
+# before this run's child has written a byte).
+if [[ -n "${FAKE_PI_STARTUP_DELAY:-}" ]]; then
+  sleep "$FAKE_PI_STARTUP_DELAY"
+fi
 
 # BOOT event: always the CLI-resolved (requested) model -- exactly what a
 # real pi writes first, before any override extension can act.

@@ -134,7 +134,15 @@ Optional flags:
   hit a legitimate 191.7s thinking turn (recovered fine) and was then
   false-killed by the old 240s default on a harder problem. If you see
   another false stall with a strong model at high/xhigh thinking on
-  Hard/Extra-hard problems, raise this further.
+  Hard/Extra-hard problems, raise this further. **Resuming an existing cell**
+  (no `--fresh`) is safe across any gap between runs, including a laptop
+  suspend spanning hours — the liveness clock is baselined from when *this*
+  run started watching (never from the session file's own, possibly-old
+  mtime), and a monitor-loop iteration gap far past its poll cadence (i.e.
+  the machine itself was asleep) is not counted as child inactivity either.
+  (A real bug, now fixed: a resumed run used to be killed on its very first
+  heartbeat, because the pre-existing session file's mtime was from the
+  prior run.)
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
 - `--effective-model-wait S` (default 20) — seconds to wait for the child to

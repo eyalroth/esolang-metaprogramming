@@ -255,6 +255,19 @@ else
   fail "stall-timeout-default: expected run_cell.sh's default --stall-timeout to be 600 with the false-stall rationale documented in run_cell.sh and pi/README.md"
 fi
 
+# resume-liveness-baseline: the stall watchdog must measure inactivity as
+# CHANGE SINCE MONITORING STARTED, never the session file's own absolute
+# mtime (a resumed file legitimately carries an OLD mtime from a prior
+# run) -- plus a suspend/wake guard for a frozen monitor-loop iteration.
+if grep -q 'last_activity_ts=' "$RUN_CELL" \
+   && grep -q 'SUSPEND_GAP_THRESHOLD' "$RUN_CELL" \
+   && grep -qi 'never the file.s own absolute mtime' "$RUN_CELL" \
+   && ! grep -q 'idle=\$(( now - live_mtime' "$RUN_CELL"; then
+  pass "resume-liveness-baseline: the stall watchdog baselines inactivity from monitor start (not the session file's own mtime) and guards against a suspended monitor loop"
+else
+  fail "resume-liveness-baseline: expected the change-since-monitor-start liveness baseline + suspend guard wiring in run_cell.sh, and the old raw-mtime idle computation to be gone"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"

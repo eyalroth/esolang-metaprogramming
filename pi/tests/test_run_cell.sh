@@ -428,6 +428,86 @@ rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S6_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S6_PROVIDER"
 rm -f "$CORRUPT_OUT"
 
+# ===========================================================================
+# Scenario 7: RESUMING a cell whose pre-existing session file carries an OLD
+# mtime must NOT be insta-killed by the stall watchdog (the real bug: the
+# watchdog used to trust the file's absolute mtime as the inactivity
+# baseline, so a resume launched more than --stall-timeout after the prior
+# run -- including across a machine suspend -- was killed on its very first
+# heartbeat, before the new child ever wrote a byte).
+# ===========================================================================
+echo
+echo "--- scenario 7: resuming a stale-mtime session is not insta-killed by the stall watchdog ---"
+
+S7_PROVIDER="test-provider-s7"
+S7_MODEL="fake-model"
+S7_THINKING="low"
+
+read -r S7_CELL_DIR S7_ARTIFACT < <(resolve_cell "$S7_PROVIDER" "$S7_MODEL" "$S7_THINKING" "$LANGUAGE")
+rm -f "$S7_CELL_DIR"/harness_state.json "$S7_CELL_DIR"/export.json "$S7_CELL_DIR"/fake_*.bf "$S7_CELL_DIR"/.run_cell.log
+rm -rf "$S7_CELL_DIR"/.pi-sessions "$S7_CELL_DIR"/.pi
+rm -f "$S7_ARTIFACT"
+
+# Pre-seed the DEFAULT session file (same naming run_cell.sh itself derives:
+# pi-esolang-<provider>-<model>-<thinking>-<language>, no slugging needed --
+# these test coordinates contain no characters that slug() would touch)
+# with a boot event, then backdate its mtime by an hour -- simulating
+# exactly what a real resumed cell's session file looks like: legitimate
+# boot events already present from a PRIOR run, with an mtime far older
+# than --stall-timeout.
+S7_SESSION_DIR="$S7_CELL_DIR/.pi-sessions"
+S7_SESSION_ID="pi-esolang-${S7_PROVIDER}-${S7_MODEL}-${S7_THINKING}-${LANGUAGE}"
+mkdir -p "$S7_SESSION_DIR"
+S7_SESSION_FILE="$S7_SESSION_DIR/${S7_SESSION_ID}.jsonl"
+printf '%s\n' \
+  "{\"type\":\"model_change\",\"provider\":\"$S7_PROVIDER\",\"modelId\":\"$S7_MODEL\"}" \
+  "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$S7_THINKING\"}" \
+  > "$S7_SESSION_FILE"
+python3 -c "import os,time; t=time.time()-3600; os.utime('$S7_SESSION_FILE', (t,t))"
+
+RESUME_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=15 FAKE_PI_SLEEP=1 FAKE_PI_STARTUP_DELAY=4 \
+  FAKE_PI_MODELS="$S7_PROVIDER/$S7_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S7_MODEL" --provider "$S7_PROVIDER" --thinking "$S7_THINKING" \
+    --language "$LANGUAGE" --max-problems 2 --heartbeat-interval 1 --stall-timeout 10 \
+    --dataset-file "$REDACTED_DATASET" > "$RESUME_OUT" 2>&1
+RESUME_RC=$?
+
+if grep -qi 'STALL DETECTED' "$RESUME_OUT"; then
+  fail "scenario 7: the stall watchdog false-killed a resumed run over its pre-existing session file's old mtime"
+  cat "$RESUME_OUT"
+else
+  pass "scenario 7: resuming a stale-mtime session file did not trigger a false STALL DETECTED"
+fi
+
+if grep -q 'verified effective model matches request' "$RESUME_OUT"; then
+  pass "scenario 7: effective-model verification still passed on resume (reading the pre-seeded boot event)"
+else
+  fail "scenario 7: expected effective-model verification to pass on resume"
+  cat "$RESUME_OUT"
+fi
+
+if [[ "$RESUME_RC" -eq 0 ]]; then
+  pass "scenario 7: run_cell.sh exited 0 (reached --max-problems normally, not killed)"
+else
+  fail "scenario 7: expected run_cell.sh to exit 0, got rc=$RESUME_RC"
+  cat "$RESUME_OUT"
+fi
+
+sleep 1
+if ps -A -o command | grep -F "$PI_TESTS_DIR/fake_pi.sh" | grep -v grep > /dev/null; then
+  fail "scenario 7: a fake_pi.sh process is still running after run_cell.sh exited (process-group leak)"
+else
+  pass "scenario 7: no orphaned fake_pi.sh process after run_cell.sh exited"
+fi
+
+rm -f "$S7_CELL_DIR"/harness_state.json "$S7_CELL_DIR"/export.json "$S7_CELL_DIR"/fake_*.bf "$S7_CELL_DIR"/.run_cell.log
+rm -rf "$S7_CELL_DIR"/.pi-sessions "$S7_CELL_DIR"/.pi
+rm -f "$S7_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S7_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S7_PROVIDER"
+rm -f "$RESUME_OUT"
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   echo "TEST_RUN_CELL: ALL CHECKS PASSED"
