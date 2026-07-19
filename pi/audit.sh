@@ -177,6 +177,31 @@ else
   fail "grid-keying: expected a model-existence pre-flight (--list-models) missing from run_cell.sh"
 fi
 
+# session-id-grid-keying: the default child --session-id must encode the
+# FULL grid coordinates (provider, model, thinking), not just the language --
+# the fix for an observed real bug where a language-only session-id let one
+# grid cell's sticky model entry leak onto a later run requesting a
+# DIFFERENT model (an operator's pi config replayed the wrong model/thinking).
+if grep -q 'def slug\|slug() {' "$RUN_CELL" \
+   && grep -qE 'SESSION_ID="\$\{SESSION_ID_OVERRIDE:-pi-esolang-\$\(slug' "$RUN_CELL"; then
+  pass "session-id-grid-keying: default child --session-id is built from the full grid coordinates (provider/model/thinking/language), not language alone"
+else
+  fail "session-id-grid-keying: expected a slug()-based, grid-coordinate default --session-id in run_cell.sh"
+fi
+
+# effective-model-assertion: after launching the child, run_cell.sh must
+# read back what pi ACTUALLY booted (model_change/thinking_level_change) and
+# kill+abort on any mismatch with what was requested -- never trusting that
+# passing --model/--provider/--thinking means they were honored.
+if grep -q 'read_effective_model_once' "$RUN_CELL" \
+   && grep -q 'model_change' "$RUN_CELL" && grep -q 'thinking_level_change' "$RUN_CELL" \
+   && grep -qi 'booted a DIFFERENT model than requested' "$RUN_CELL" \
+   && grep -q 'EFFECTIVE_MODEL_WAIT' "$RUN_CELL"; then
+  pass "effective-model-assertion: run_cell.sh verifies the effective model/provider/thinking and aborts on mismatch"
+else
+  fail "effective-model-assertion: expected effective-model verification wiring missing from run_cell.sh"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"

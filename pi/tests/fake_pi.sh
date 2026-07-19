@@ -19,17 +19,32 @@
 # "provider/model" pairs) to control which pairs this stub reports as
 # existing; defaults to test-provider-s1/fake-model and
 # test-provider-s2/fake-model (the pairs the test scenarios use).
+#
+# It also writes model_change/thinking_level_change events to the session
+# file immediately at startup, mimicking what a real pi records -- this is
+# what run_cell.sh's effective-model verification reads back. By default it
+# echoes back whatever --provider/--model/--thinking it was actually passed
+# (so a normal run's verification passes); set FAKE_PI_EFFECTIVE_PROVIDER /
+# FAKE_PI_EFFECTIVE_MODEL / FAKE_PI_EFFECTIVE_THINKING to simulate an
+# operator's pi config silently overriding the request (the real bug this
+# guards against).
 set -uo pipefail
 
 SESSION_DIR=""
 SESSION_ID=""
 LIST_MODELS=""
+MODEL=""
+PROVIDER=""
+THINKING=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --list-models) LIST_MODELS=1; shift 1 ;;
     --session-dir) SESSION_DIR="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID="${2:-}"; shift 2 ;;
-    --model|--tools|--provider|--thinking) shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --provider) PROVIDER="${2:-}"; shift 2 ;;
+    --thinking) THINKING="${2:-}"; shift 2 ;;
+    --tools) shift 2 ;;
     -p|--print|-a) shift 1 ;;
     *) shift 1 ;;
   esac
@@ -49,6 +64,15 @@ if [[ -z "$SESSION_DIR" || -z "$SESSION_ID" ]]; then
 fi
 mkdir -p "$SESSION_DIR"
 SESSION_FILE="$SESSION_DIR/${SESSION_ID}.jsonl"
+
+# Report the EFFECTIVE model/provider/thinking -- defaults to whatever was
+# actually requested (so a normal run's effective-model verification
+# passes); override via FAKE_PI_EFFECTIVE_* to simulate a silent override.
+EFF_PROVIDER="${FAKE_PI_EFFECTIVE_PROVIDER:-$PROVIDER}"
+EFF_MODEL="${FAKE_PI_EFFECTIVE_MODEL:-$MODEL}"
+EFF_THINKING="${FAKE_PI_EFFECTIVE_THINKING:-$THINKING}"
+echo "{\"type\":\"model_change\",\"provider\":\"$EFF_PROVIDER\",\"modelId\":\"$EFF_MODEL\"}" >> "$SESSION_FILE"
+echo "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$EFF_THINKING\"}" >> "$SESSION_FILE"
 
 CYCLES="${FAKE_PI_CYCLES:-15}"
 SLEEP_S="${FAKE_PI_SLEEP:-1}"

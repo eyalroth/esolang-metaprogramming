@@ -71,6 +71,7 @@ MAX_CONTINUATIONS=3
 HEARTBEAT_INTERVAL=15
 STALL_TIMEOUT=240
 POLL_INTERVAL=2
+EFFECTIVE_MODEL_WAIT=20
 DATASET_FILE="$REPO_ROOT/benchmark_harness/private/esolang_full_private.local.json"
 SESSION_ID_OVERRIDE=""
 ALLOWED_TOOLS="read,bash,edit,write"
@@ -111,20 +112,43 @@ Options:
                            trips it.
   --dataset-file PATH     Private JSON to use as HARNESS_PRIVATE_FILE
                            (default: benchmark_harness/private/esolang_full_private.local.json)
-  --session-id ID         pi session id for the child (default: pi-esolang-<language>).
-                           If this repo is a bench-managed clone, pass a grant token here
-                           (see the SAFETY note above) or the child's bash/read/write will
-                           be blocked by the bench-lock guard.
+  --session-id ID         pi session id for the child (default:
+                           pi-esolang-<provider>-<model>-<thinking>-<language>, each
+                           component slugged -- see "Effective-model verification" below
+                           for why this default is grid-specific, not language-only). If
+                           this repo is a bench-managed clone, pass a grant token here (see
+                           the SAFETY note above) or the child's bash/read/write will be
+                           blocked by the bench-lock guard.
   --allowed-tools LIST    Comma-separated pi --tools allowlist for the child
                            (default: $ALLOWED_TOOLS -- deliberately excludes
                            craft_*/initiative_*/bench/ask_user_question/mcp).
+  --effective-model-wait S Seconds to wait for the child to report the model/provider/
+                           thinking it ACTUALLY booted, before giving up and aborting
+                           (default: $EFFECTIVE_MODEL_WAIT). See "Effective-model
+                           verification" below.
 
 Result keying: state + the export artifact are keyed on the FULL grid --
 harness (this pi/ dir) x provider x model x thinking x language -- at
 experiments/01_main_experiments/pi/<provider>/<model>/<thinking>/<language>/
 and pi/artifacts/<provider>/<model>/<thinking>/<language>_export.json. See
 pi/setup_cells.py.
+
+Effective-model verification: pi's own model-selection layer (extensions,
+sticky per-session-id defaults, etc.) can silently override an explicit
+--model/--provider/--thinking with something else entirely -- this has been
+observed in practice: a fixed, language-only session-id let a stale sticky
+model entry from one grid cell get replayed onto a LATER run requesting a
+DIFFERENT model, and the wrong model ran while results were filed under the
+requested grid path. Two defenses: (1) the default --session-id above is
+derived from the FULL grid coordinates, so distinct (provider, model,
+thinking) points never share one sticky per-session entry; (2) after
+launching the child, this script reads back the model_change/
+thinking_level_change events the child ACTUALLY wrote to its session file
+and ABORTS (non-zero, naming both what was requested and what was
+effective) if they don't match what was requested -- never trusting that
+CLI flags were silently honored just because they were passed.
 EOF
+
   exit 1
 }
 
@@ -142,6 +166,7 @@ while [[ $# -gt 0 ]]; do
     --dataset-file) DATASET_FILE="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID_OVERRIDE="${2:-}"; shift 2 ;;
     --allowed-tools) ALLOWED_TOOLS="${2:-}"; shift 2 ;;
+    --effective-model-wait) EFFECTIVE_MODEL_WAIT="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage ;;
   esac
@@ -224,7 +249,14 @@ fi
 
 SESSION_DIR="$CELL_DIR/.pi-sessions"
 mkdir -p "$SESSION_DIR"
-SESSION_ID="${SESSION_ID_OVERRIDE:-pi-esolang-$LANGUAGE}"
+# Sanitize a grid-dimension value into a session-id-safe token, mirroring
+# setup_cells.py's slug() (same [^A-Za-z0-9._-] -> '_' rule). The DEFAULT
+# session-id below encodes the FULL grid coordinates -- not just the
+# language -- so distinct (provider, model, thinking) points never share one
+# sticky per-session-id model entry (see "Effective-model verification" in
+# --help; this was an observed real bug, not a hypothetical).
+slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+SESSION_ID="${SESSION_ID_OVERRIDE:-pi-esolang-$(slug "$PROVIDER")-$(slug "$MODEL")-$(slug "$THINKING")-$(slug "$LANGUAGE")}"
 RUN_LOG="$CELL_DIR/.run_cell.log"
 
 # ---------------------------------------------------------------------------
@@ -259,6 +291,46 @@ if not files:
 else:
     f = max(files, key=os.path.getmtime)
     print(int(os.path.getmtime(f)), os.path.getsize(f))
+PYEOF
+}
+
+# Reads whichever .jsonl under SESSION_DIR was most recently modified and
+# returns the LAST model_change (provider+modelId) and thinking_level_change
+# (thinkingLevel) it contains, as "FOUND <provider> <modelId> <thinkingLevel>"
+# -- or "PENDING" if no session file exists yet, or either event hasn't been
+# written yet. A single pass (no internal sleep/wait -- the caller polls).
+read_effective_model_once() {
+  python3 - "$SESSION_DIR" <<'PYEOF'
+import glob, json, os, sys
+
+session_dir = sys.argv[1]
+files = glob.glob(os.path.join(session_dir, "**", "*.jsonl"), recursive=True)
+if not files:
+    print("PENDING")
+    sys.exit(0)
+f = max(files, key=os.path.getmtime)
+provider = model = thinking = None
+try:
+    with open(f) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if o.get("type") == "model_change":
+                provider = o.get("provider")
+                model = o.get("modelId")
+            elif o.get("type") == "thinking_level_change":
+                thinking = o.get("thinkingLevel")
+except OSError:
+    pass
+if provider is not None and model is not None and thinking is not None:
+    print(f"FOUND {provider} {model} {thinking}")
+else:
+    print("PENDING")
 PYEOF
 }
 
@@ -324,9 +396,48 @@ while (( attempt <= max_attempts )); do
   PI_PID=$!
   PI_PGID="$(ps -o pgid= -p "$PI_PID" 2>/dev/null | tr -d ' ')"
 
+  # Effective-model verification: read back what pi ACTUALLY booted (never
+  # trust that passing --model/--provider/--thinking means they were
+  # honored -- an operator's own pi config can silently override them, e.g.
+  # a sticky per-session-id default; this happened in practice). Poll until
+  # both events appear, the wait bound elapses, or the child exits.
+  emw_deadline=$(( $(date +%s) + EFFECTIVE_MODEL_WAIT ))
+  EFF_STATUS="PENDING"
+  while (( $(date +%s) < emw_deadline )); do
+    EFF_LINE="$(read_effective_model_once)"
+    if [[ "$EFF_LINE" == FOUND* ]]; then
+      EFF_STATUS="FOUND"
+      read -r _ EFF_PROVIDER EFF_MODEL EFF_THINKING <<<"$EFF_LINE"
+      break
+    fi
+    kill -0 "$PI_PID" 2>/dev/null || break
+    sleep 0.5
+  done
+
+  killed_this_attempt=""
+  if [[ "$EFF_STATUS" != "FOUND" ]]; then
+    echo "ERROR: could not verify the effective model/provider/thinking pi actually booted within ${EFFECTIVE_MODEL_WAIT}s (no model_change/thinking_level_change event seen in the session file) -- aborting rather than risk mislabeling results under provider=$PROVIDER model=$MODEL thinking=$THINKING." >&2
+    kill_child_group
+    STOP_REASON="effective_model_unverifiable"
+    killed_this_attempt=1
+  elif [[ "$EFF_PROVIDER" != "$PROVIDER" || "$EFF_MODEL" != "$MODEL" || "$EFF_THINKING" != "$THINKING" ]]; then
+    echo "ERROR: pi booted a DIFFERENT model than requested -- requested provider=$PROVIDER model=$MODEL thinking=$THINKING but EFFECTIVE was provider=$EFF_PROVIDER model=$EFF_MODEL thinking=$EFF_THINKING. Your pi config silently overrode the CLI flags (e.g. a sticky model-selection default/session entry). Killing the run to avoid filing results under the wrong grid path." >&2
+    kill_child_group
+    STOP_REASON="effective_model_mismatch"
+    killed_this_attempt=1
+  else
+    echo "[run_cell] verified effective model matches request: provider=$PROVIDER model=$MODEL thinking=$THINKING"
+  fi
+
+  if [[ -n "$killed_this_attempt" ]]; then
+    wait "$PI_PID" 2>/dev/null
+    PI_PID=""
+    PI_PGID=""
+    break
+  fi
+
   last_heartbeat=0
   start_ts=$(date +%s)
-  killed_this_attempt=""
 
   while kill -0 "$PI_PID" 2>/dev/null; do
     now=$(date +%s)

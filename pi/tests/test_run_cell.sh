@@ -78,6 +78,21 @@ grep -q 'STALL DETECTED' "$RUN_OUT" \
   && fail "a spurious stall was detected during a healthy run" \
   || pass "no spurious stall detected"
 
+grep -q 'verified effective model matches request' "$RUN_OUT" \
+  && pass "effective-model verification passed (fake_pi.sh's booted model matched the request)" \
+  || { fail "expected an effective-model verification success line"; cat "$RUN_OUT"; }
+
+# The default --session-id must encode the FULL grid coordinates (provider,
+# model, thinking), not just the language -- the fix for the real bug where
+# a language-only session-id let one grid cell's sticky model entry leak
+# onto a later run requesting a DIFFERENT model.
+if ls "$S1_CELL_DIR"/.pi-sessions/*"$S1_PROVIDER"*"$S1_MODEL"*"$S1_THINKING"* >/dev/null 2>&1; then
+  pass "default --session-id encodes the full grid coordinates (provider/model/thinking found in the session file name)"
+else
+  fail "expected the default --session-id to include provider/model/thinking grid coordinates"
+  ls -la "$S1_CELL_DIR"/.pi-sessions/ 2>&1
+fi
+
 if grep -q "ARTIFACT=$S1_ARTIFACT\|copied to $S1_ARTIFACT" "$RUN_OUT" || [[ -f "$S1_ARTIFACT" ]]; then
   pass "artifact landed at the nested grid path ($S1_ARTIFACT)"
 else
@@ -223,6 +238,70 @@ fi
 rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S3_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S3_PROVIDER"
 rm -f "$BOGUS_OUT"
+
+# ===========================================================================
+# Scenario 4: the effective model pi ACTUALLY booted differs from what was
+# requested (an operator's pi config silently overrode it, e.g. a sticky
+# per-session model default) -- run_cell.sh must detect this and kill the
+# run rather than file results under the wrong grid path.
+# ===========================================================================
+echo
+echo "--- scenario 4: effective-model mismatch is detected and kills the run ---"
+
+S4_PROVIDER="test-provider-s4"
+S4_MODEL="fake-model"
+S4_THINKING="low"
+S4_WRONG_MODEL="sneaky-substituted-model"
+
+read -r S4_CELL_DIR S4_ARTIFACT < <(resolve_cell "$S4_PROVIDER" "$S4_MODEL" "$S4_THINKING" "$LANGUAGE")
+rm -f "$S4_CELL_DIR"/harness_state.json "$S4_CELL_DIR"/export.json "$S4_CELL_DIR"/fake_*.bf "$S4_CELL_DIR"/.run_cell.log
+rm -rf "$S4_CELL_DIR"/.pi-sessions
+rm -f "$S4_ARTIFACT"
+
+MISMATCH_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=15 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S4_PROVIDER/$S4_MODEL" \
+  FAKE_PI_EFFECTIVE_MODEL="$S4_WRONG_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S4_MODEL" --provider "$S4_PROVIDER" --thinking "$S4_THINKING" \
+    --language "$LANGUAGE" --heartbeat-interval 1 --stall-timeout 60 --effective-model-wait 5 \
+    --dataset-file "$REDACTED_DATASET" > "$MISMATCH_OUT" 2>&1
+MISMATCH_RC=$?
+
+if [[ "$MISMATCH_RC" -ne 0 ]] && grep -q "model=$S4_MODEL" "$MISMATCH_OUT" && grep -q "model=$S4_WRONG_MODEL" "$MISMATCH_OUT"; then
+  pass "scenario 4: run_cell.sh detects the effective-model mismatch and exits non-zero, naming both requested ($S4_MODEL) and effective ($S4_WRONG_MODEL)"
+else
+  fail "scenario 4: expected non-zero exit + both model names in the error, got rc=$MISMATCH_RC"
+  cat "$MISMATCH_OUT"
+fi
+
+if [[ -f "$S4_CELL_DIR/harness_state.json" ]]; then
+  S4_SUBS="$(python3 -c "
+import json
+d = json.load(open('$S4_CELL_DIR/harness_state.json'))
+print(sum(len(p['submissions']) for p in d['problems'].values()))
+" 2>/dev/null || echo 0)"
+else
+  S4_SUBS=0
+fi
+if [[ "$S4_SUBS" -eq 0 ]]; then
+  pass "scenario 4: no submissions were made -- the mismatch was caught before any problem work happened"
+else
+  fail "scenario 4: expected 0 submissions (killed before problem work), got $S4_SUBS"
+fi
+
+sleep 1
+if ps -A -o command | grep -F "$PI_TESTS_DIR/fake_pi.sh" | grep -v grep > /dev/null; then
+  fail "scenario 4: a fake_pi.sh process is still running after the mismatch kill (process-group leak)"
+else
+  pass "scenario 4: no orphaned fake_pi.sh process after the mismatch kill"
+fi
+
+rm -f "$S4_CELL_DIR"/harness_state.json "$S4_CELL_DIR"/export.json "$S4_CELL_DIR"/fake_*.bf "$S4_CELL_DIR"/.run_cell.log
+rm -rf "$S4_CELL_DIR"/.pi-sessions
+rm -f "$S4_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S4_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S4_PROVIDER"
+rm -f "$MISMATCH_OUT"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

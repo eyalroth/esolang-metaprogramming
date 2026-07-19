@@ -88,6 +88,26 @@ on a typo — exactly the kind of silent misattribution this toolkit is built
 to avoid; a bad id is now a hard error naming the model, not a quietly wrong
 result.
 
+**Listing ≠ actually booting — the effective model is verified too.** A real
+run surfaced that `--list-models` passing is NOT sufficient proof: an
+operator's own pi config/extensions can still silently override an explicit
+`--model`/`--provider`/`--thinking` after boot (observed cause: a sticky
+per-session-id model default replaying a stale model onto a run that
+requested a different one, because the child session-id was language-only
+and collided across grid cells). Two defenses now in place:
+
+1. The child's default `--session-id` is derived from the **full grid
+   coordinates** (provider, model, thinking, language), not just the
+   language, so distinct grid points never share one sticky per-session
+   model entry.
+2. After launching the child, `run_cell.sh` reads back the
+   `model_change`/`thinking_level_change` events the child **actually**
+   wrote to its own session file, and **kills the run + exits non-zero** if
+   the effective provider/model/thinking don't match what was requested
+   (naming both). Tune the wait bound with `--effective-model-wait S`
+   (default 20s). This means a grid cell's result is never silently filed
+   under the wrong model.
+
 Optional flags:
 - `--fresh` — reset **this specific grid cell's** state
   (`harness_state.json`, `export.json`, `.pi-sessions`) before running, so
@@ -110,6 +130,9 @@ Optional flags:
   inside one `run` call) never trips it.
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
+- `--effective-model-wait S` (default 20) — seconds to wait for the child to
+  report the model/provider/thinking it actually booted before giving up
+  and aborting (see the effective-model verification note above).
 
 ### Result keying: the full experimental grid
 
