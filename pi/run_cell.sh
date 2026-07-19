@@ -72,6 +72,7 @@ HEARTBEAT_INTERVAL=15
 STALL_TIMEOUT=240
 POLL_INTERVAL=2
 EFFECTIVE_MODEL_WAIT=20
+EFFECTIVE_MODEL_SETTLE=2
 DATASET_FILE="$REPO_ROOT/benchmark_harness/private/esolang_full_private.local.json"
 SESSION_ID_OVERRIDE=""
 ALLOWED_TOOLS="read,bash,edit,write"
@@ -126,6 +127,10 @@ Options:
                            thinking it ACTUALLY booted, before giving up and aborting
                            (default: $EFFECTIVE_MODEL_WAIT). See "Effective-model
                            verification" below.
+  --effective-model-settle S  Seconds the last-seen effective model/thinking must stay
+                           UNCHANGED before it's trusted (default: $EFFECTIVE_MODEL_SETTLE) --
+                           guards against reading only the FIRST (boot) model_change and
+                           missing a later silent override a few hundred ms after boot.
 
 Result keying: state + the export artifact are keyed on the FULL grid --
 harness (this pi/ dir) x provider x model x thinking x language -- at
@@ -167,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --session-id) SESSION_ID_OVERRIDE="${2:-}"; shift 2 ;;
     --allowed-tools) ALLOWED_TOOLS="${2:-}"; shift 2 ;;
     --effective-model-wait) EFFECTIVE_MODEL_WAIT="${2:-}"; shift 2 ;;
+    --effective-model-settle) EFFECTIVE_MODEL_SETTLE="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage ;;
   esac
@@ -350,6 +356,18 @@ kill_child_group() {
 finalize_export() {
   [[ "$EXPORTED" -eq 1 ]] && return 0
   EXPORTED=1
+  # Never file an artifact for a run we couldn't trust the model on -- an
+  # effective-model mismatch/unverifiable run may have done SOME (wrong- or
+  # unknown-model) harness work before detection; exporting it under the
+  # requested grid path would be exactly the silent mislabel this guard
+  # exists to prevent. The cell's own harness_state.json/export.json are
+  # left on disk for inspection; only the copy into pi/artifacts/ is skipped.
+  case "${STOP_REASON:-}" in
+    effective_model_mismatch|effective_model_unverifiable)
+      echo "[run_cell] skipping artifact export -- STOP_REASON=$STOP_REASON (the effective model could not be trusted, so no result is filed under $ARTIFACT_PATH)"
+      return 0
+      ;;
+  esac
   python3 harness.py export || true
   mkdir -p "$(dirname "$ARTIFACT_PATH")"
   [[ -f "$CELL_DIR/export.json" ]] && cp "$CELL_DIR/export.json" "$ARTIFACT_PATH"
@@ -399,20 +417,45 @@ while (( attempt <= max_attempts )); do
   # Effective-model verification: read back what pi ACTUALLY booted (never
   # trust that passing --model/--provider/--thinking means they were
   # honored -- an operator's own pi config can silently override them, e.g.
-  # a sticky per-session-id default; this happened in practice). Poll until
-  # both events appear, the wait bound elapses, or the child exits.
+  # a sticky per-session-id default; this happened in practice). NOTE: this
+  # must NOT break on the FIRST model_change/thinking_level_change seen --
+  # that's just the boot event, which pi always writes as the CLI-resolved
+  # (correct) model; a silent override lands as a SEPARATE, LATER
+  # model_change moments afterward (observed in practice: two model_change
+  # events ~130ms apart, the second one wrong). So this polls until the
+  # LAST-seen (provider, model, thinking) triple has been STABLE for
+  # EFFECTIVE_MODEL_SETTLE seconds -- i.e. it waits out the whole
+  # model-selection burst, not just its first event -- or the wait bound
+  # elapses, or the child exits.
   emw_deadline=$(( $(date +%s) + EFFECTIVE_MODEL_WAIT ))
   EFF_STATUS="PENDING"
+  last_sig=""
+  stable_since=""
   while (( $(date +%s) < emw_deadline )); do
     EFF_LINE="$(read_effective_model_once)"
+    now=$(date +%s)
     if [[ "$EFF_LINE" == FOUND* ]]; then
-      EFF_STATUS="FOUND"
-      read -r _ EFF_PROVIDER EFF_MODEL EFF_THINKING <<<"$EFF_LINE"
-      break
+      if [[ "$EFF_LINE" != "$last_sig" ]]; then
+        last_sig="$EFF_LINE"
+        stable_since=$now
+      elif (( now - stable_since >= EFFECTIVE_MODEL_SETTLE )); then
+        EFF_STATUS="FOUND"
+        read -r _ EFF_PROVIDER EFF_MODEL EFF_THINKING <<<"$EFF_LINE"
+        break
+      fi
     fi
     kill -0 "$PI_PID" 2>/dev/null || break
-    sleep 0.5
+    sleep 0.3
   done
+  # Child exited (or the wait bound elapsed) before the signature ever
+  # settled for the full window, but SOMETHING was seen -- use the last
+  # value observed rather than declaring it fully unverifiable, since a
+  # quick-exiting child (e.g. a short fake/test run) legitimately never
+  # reaches a full settle window.
+  if [[ "$EFF_STATUS" != "FOUND" && -n "$last_sig" ]]; then
+    EFF_STATUS="FOUND"
+    read -r _ EFF_PROVIDER EFF_MODEL EFF_THINKING <<<"$last_sig"
+  fi
 
   killed_this_attempt=""
   if [[ "$EFF_STATUS" != "FOUND" ]]; then

@@ -258,12 +258,23 @@ rm -f "$S4_CELL_DIR"/harness_state.json "$S4_CELL_DIR"/export.json "$S4_CELL_DIR
 rm -rf "$S4_CELL_DIR"/.pi-sessions
 rm -f "$S4_ARTIFACT"
 
+# The override lands as a SEPARATE, LATER model_change (FAKE_PI_OVERRIDE_DELAY
+# after the boot event, default 1s) -- proving run_cell.sh's settle-based
+# check catches a late override, not just a mismatch present from the very
+# first model_change it happens to see (a first-found-wins check would read
+# the correct BOOT event and pass, missing the override entirely).
+# The override delay MUST be well SHORTER than the settle window (the
+# override needs to have already landed before run_cell.sh would otherwise
+# have declared the boot value "stable") -- 0.5s delay vs. the default 2s
+# settle leaves a comfortable margin either way.
 MISMATCH_OUT="$(mktemp)"
-PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=15 FAKE_PI_SLEEP=1 \
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" \
   FAKE_PI_MODELS="$S4_PROVIDER/$S4_MODEL" \
   FAKE_PI_EFFECTIVE_MODEL="$S4_WRONG_MODEL" \
+  FAKE_PI_OVERRIDE_DELAY=0.5 FAKE_PI_OVERRIDE_IDLE=30 \
   "$PI_DIR/run_cell.sh" --model "$S4_MODEL" --provider "$S4_PROVIDER" --thinking "$S4_THINKING" \
-    --language "$LANGUAGE" --heartbeat-interval 1 --stall-timeout 60 --effective-model-wait 5 \
+    --language "$LANGUAGE" --heartbeat-interval 1 --stall-timeout 15 \
+    --effective-model-wait 10 \
     --dataset-file "$REDACTED_DATASET" > "$MISMATCH_OUT" 2>&1
 MISMATCH_RC=$?
 

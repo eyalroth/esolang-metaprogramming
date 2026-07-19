@@ -201,6 +201,22 @@ if grep -q 'read_effective_model_once' "$RUN_CELL" \
 else
   fail "effective-model-assertion: expected effective-model verification wiring missing from run_cell.sh"
 fi
+# The verification must NOT be first-found-wins (that reads only the boot
+# event and misses a later silent override) -- it must require the
+# last-seen model/thinking to be STABLE for EFFECTIVE_MODEL_SETTLE seconds.
+if grep -q 'EFFECTIVE_MODEL_SETTLE' "$RUN_CELL" && grep -q 'stable_since' "$RUN_CELL"; then
+  pass "effective-model-assertion: verification requires the effective model to be STABLE (settle window), not just present on the first read"
+else
+  fail "effective-model-assertion: expected a settle-window (EFFECTIVE_MODEL_SETTLE/stable_since) guard against reading only the boot event, missing from run_cell.sh"
+fi
+# A mismatched/unverifiable run must never file a result artifact under the
+# requested grid path.
+if grep -q 'effective_model_mismatch|effective_model_unverifiable' "$RUN_CELL" \
+   && grep -qi 'skipping artifact export' "$RUN_CELL"; then
+  pass "effective-model-assertion: a mismatched/unverifiable run skips filing an artifact under the grid path"
+else
+  fail "effective-model-assertion: expected finalize_export to skip on an effective-model mismatch/unverifiable run"
+fi
 
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then

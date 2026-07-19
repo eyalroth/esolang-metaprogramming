@@ -20,14 +20,19 @@
 # existing; defaults to test-provider-s1/fake-model and
 # test-provider-s2/fake-model (the pairs the test scenarios use).
 #
-# It also writes model_change/thinking_level_change events to the session
-# file immediately at startup, mimicking what a real pi records -- this is
-# what run_cell.sh's effective-model verification reads back. By default it
-# echoes back whatever --provider/--model/--thinking it was actually passed
-# (so a normal run's verification passes); set FAKE_PI_EFFECTIVE_PROVIDER /
-# FAKE_PI_EFFECTIVE_MODEL / FAKE_PI_EFFECTIVE_THINKING to simulate an
-# operator's pi config silently overriding the request (the real bug this
-# guards against).
+# It also writes a model_change/thinking_level_change BOOT event immediately
+# at startup (the CLI-resolved model -- what a real pi always writes first),
+# mimicking what run_cell.sh's effective-model verification reads back. By
+# default there is no further change (so a normal run's verification
+# passes). Set FAKE_PI_EFFECTIVE_PROVIDER / FAKE_PI_EFFECTIVE_MODEL /
+# FAKE_PI_EFFECTIVE_THINKING to simulate an operator's pi config silently
+# OVERRIDING the request: this stub then sleeps FAKE_PI_OVERRIDE_DELAY
+# seconds (default 1) and writes a SECOND, LATER model_change/
+# thinking_level_change with the override values -- mirroring the real bug
+# (two model_change events ~130ms apart, the second one wrong) -- then does
+# NOT run any fetch/submit cycle (idles until killed), since the point of
+# that path is purely to exercise run_cell.sh's detection+kill, not harness
+# interaction.
 set -uo pipefail
 
 SESSION_DIR=""
@@ -65,14 +70,24 @@ fi
 mkdir -p "$SESSION_DIR"
 SESSION_FILE="$SESSION_DIR/${SESSION_ID}.jsonl"
 
-# Report the EFFECTIVE model/provider/thinking -- defaults to whatever was
-# actually requested (so a normal run's effective-model verification
-# passes); override via FAKE_PI_EFFECTIVE_* to simulate a silent override.
+# BOOT event: always the CLI-resolved (requested) model -- exactly what a
+# real pi writes first, before any override extension can act.
+echo "{\"type\":\"model_change\",\"provider\":\"$PROVIDER\",\"modelId\":\"$MODEL\"}" >> "$SESSION_FILE"
+echo "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$THINKING\"}" >> "$SESSION_FILE"
+
 EFF_PROVIDER="${FAKE_PI_EFFECTIVE_PROVIDER:-$PROVIDER}"
 EFF_MODEL="${FAKE_PI_EFFECTIVE_MODEL:-$MODEL}"
 EFF_THINKING="${FAKE_PI_EFFECTIVE_THINKING:-$THINKING}"
-echo "{\"type\":\"model_change\",\"provider\":\"$EFF_PROVIDER\",\"modelId\":\"$EFF_MODEL\"}" >> "$SESSION_FILE"
-echo "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$EFF_THINKING\"}" >> "$SESSION_FILE"
+if [[ "$EFF_PROVIDER" != "$PROVIDER" || "$EFF_MODEL" != "$MODEL" || "$EFF_THINKING" != "$THINKING" ]]; then
+  # Simulate a LATE silent override: a SEPARATE model_change/
+  # thinking_level_change a short delay after boot, then no harness work --
+  # idle until run_cell.sh's kill terminates this process (SIGTERM/SIGKILL).
+  sleep "${FAKE_PI_OVERRIDE_DELAY:-1}"
+  echo "{\"type\":\"model_change\",\"provider\":\"$EFF_PROVIDER\",\"modelId\":\"$EFF_MODEL\"}" >> "$SESSION_FILE"
+  echo "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$EFF_THINKING\"}" >> "$SESSION_FILE"
+  sleep "${FAKE_PI_OVERRIDE_IDLE:-30}"
+  exit 0
+fi
 
 CYCLES="${FAKE_PI_CYCLES:-15}"
 SLEEP_S="${FAKE_PI_SLEEP:-1}"
