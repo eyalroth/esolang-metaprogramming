@@ -123,11 +123,18 @@ Optional flags:
   up to N times. This only fires on a genuine early yield, never on a timer.
 - `--heartbeat-interval S` (default 15) — seconds between progress heartbeat
   lines while the run is in flight.
-- `--stall-timeout S` (default 240) — seconds of **zero session-file
+- `--stall-timeout S` (default 600) — seconds of **zero session-file
   growth** (i.e. the model has produced no new output/tool activity at all)
   before the run is treated as hung and killed. This is a liveness check, not
   a run-length cap — a slow-but-active run (e.g. a big interpreter loop
-  inside one `run` call) never trips it.
+  inside one `run` call) never trips it. **Caveat:** pi only writes a
+  session-file record when a turn *completes* — nothing streams mid-turn in
+  `-p` mode — so a long single high-thinking turn produces zero growth and
+  looks identical to a hang. 600s was picked after a real sonnet-5/high run
+  hit a legitimate 191.7s thinking turn (recovered fine) and was then
+  false-killed by the old 240s default on a harder problem. If you see
+  another false stall with a strong model at high/xhigh thinking on
+  Hard/Extra-hard problems, raise this further.
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
 - `--effective-model-wait S` (default 20) — seconds to wait for the child to

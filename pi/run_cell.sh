@@ -69,7 +69,7 @@ FRESH=""
 MAX_PROBLEMS=""
 MAX_CONTINUATIONS=3
 HEARTBEAT_INTERVAL=15
-STALL_TIMEOUT=240
+STALL_TIMEOUT=600
 POLL_INTERVAL=2
 EFFECTIVE_MODEL_WAIT=20
 EFFECTIVE_MODEL_SETTLE=2
@@ -111,7 +111,17 @@ Options:
   --stall-timeout S       Seconds of NO session-file growth before treating the run as
                            hung and killing it (default: $STALL_TIMEOUT). This is a liveness
                            check, not a fixed run-length cap -- a slow but active run never
-                           trips it.
+                           trips it. IMPORTANT: pi only writes a session-file record when a
+                           turn COMPLETES (nothing streams to stdout mid-turn in `-p` mode),
+                           so a long single high-thinking turn produces ZERO growth and looks
+                           identical to a hang. The default must comfortably clear the
+                           model's longest legitimate single thinking turn -- 600s was chosen
+                           after observing a real sonnet-5/high run with a 191.7s legitimate
+                           thinking turn (recovered fine) get false-killed on a HARDER problem
+                           at the old 240s default. Raise this further for a very strong model
+                           at high/xhigh thinking on the Hard/Extra-hard tiers if you see
+                           another false stall; lower it only for a fast/no-thinking model
+                           where you want quicker true-hang detection.
   --dataset-file PATH     Private JSON to use as HARNESS_PRIVATE_FILE
                            (default: benchmark_harness/private/esolang_full_private.local.json)
   --session-id ID         pi session id for the child (default:

@@ -243,6 +243,18 @@ else
   fail "heartbeat-status-resilience: expected retry/keep-last-known/stderr-suppression wiring missing from harness_status in run_cell.sh"
 fi
 
+# stall-timeout-default: the liveness ceiling must comfortably clear a real
+# long high-thinking turn (observed legitimate turns up to ~192s got
+# false-killed by the old 240s default on a harder problem) while still
+# eventually catching a true hang -- 600s.
+if grep -qE '^STALL_TIMEOUT=600$' "$RUN_CELL" \
+   && grep -qi 'must comfortably clear' "$RUN_CELL" \
+   && grep -q '(default 600)' "$PI_DIR/README.md"; then
+  pass "stall-timeout-default: run_cell.sh's default --stall-timeout is 600s and the rationale (a long thinking turn produces zero file growth) is documented"
+else
+  fail "stall-timeout-default: expected run_cell.sh's default --stall-timeout to be 600 with the false-stall rationale documented in run_cell.sh and pi/README.md"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"
