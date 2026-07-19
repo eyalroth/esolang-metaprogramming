@@ -33,6 +33,12 @@
 # NOT run any fetch/submit cycle (idles until killed), since the point of
 # that path is purely to exercise run_cell.sh's detection+kill, not harness
 # interaction.
+#
+# Set FAKE_PI_CORRUPT_STATE to simulate the observed harness_state.json
+# read/write race: this stub corrupts the state file with invalid JSON, then
+# idles (FAKE_PI_CORRUPT_IDLE, default 30s) -- exercising run_cell.sh's
+# heartbeat resilience (retry + keep last-known ST_* values + no leaked
+# Python traceback) against a state file that's persistently unreadable.
 set -uo pipefail
 
 SESSION_DIR=""
@@ -86,6 +92,17 @@ if [[ "$EFF_PROVIDER" != "$PROVIDER" || "$EFF_MODEL" != "$MODEL" || "$EFF_THINKI
   echo "{\"type\":\"model_change\",\"provider\":\"$EFF_PROVIDER\",\"modelId\":\"$EFF_MODEL\"}" >> "$SESSION_FILE"
   echo "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"$EFF_THINKING\"}" >> "$SESSION_FILE"
   sleep "${FAKE_PI_OVERRIDE_IDLE:-30}"
+  exit 0
+fi
+
+# Simulate the observed harness_state.json read/write race: corrupt the
+# state file (invalid JSON) and then idle -- exercising run_cell.sh's
+# heartbeat resilience (retry + keep-last-known + no leaked traceback)
+# against a state file that's PERSISTENTLY unreadable for a while, a
+# superset of the real, transient race.
+if [[ -n "${FAKE_PI_CORRUPT_STATE:-}" ]]; then
+  printf '{not valid json' > harness_state.json
+  sleep "${FAKE_PI_CORRUPT_IDLE:-30}"
   exit 0
 fi
 

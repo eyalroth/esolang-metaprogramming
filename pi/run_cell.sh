@@ -76,6 +76,7 @@ EFFECTIVE_MODEL_SETTLE=2
 DATASET_FILE="$REPO_ROOT/benchmark_harness/private/esolang_full_private.local.json"
 SESSION_ID_OVERRIDE=""
 ALLOWED_TOOLS="read,bash,edit,write"
+COMPACTION="on"
 
 usage() {
   cat >&2 <<EOF
@@ -131,6 +132,15 @@ Options:
                            UNCHANGED before it's trusted (default: $EFFECTIVE_MODEL_SETTLE) --
                            guards against reading only the FIRST (boot) model_change and
                            missing a later silent override a few hundred ms after boot.
+  --compaction on|off     Whether the CHILD auto-compacts its context when full (default:
+                           $COMPACTION). Written to a cell-local .pi/settings.json that pi
+                           merges OVER your global setting for this child only (your own
+                           global default is never touched) -- ON matches the paper's own
+                           harnesses (e.g. Claude Code auto-compacts by default), which is
+                           how a single session survives all 80 problems instead of
+                           collapsing (fetch-spamming the rest into skips) once context
+                           fills. Turn it off only if you specifically want to observe/study
+                           that collapse.
 
 Result keying: state + the export artifact are keyed on the FULL grid --
 harness (this pi/ dir) x provider x model x thinking x language -- at
@@ -173,6 +183,7 @@ while [[ $# -gt 0 ]]; do
     --allowed-tools) ALLOWED_TOOLS="${2:-}"; shift 2 ;;
     --effective-model-wait) EFFECTIVE_MODEL_WAIT="${2:-}"; shift 2 ;;
     --effective-model-settle) EFFECTIVE_MODEL_SETTLE="${2:-}"; shift 2 ;;
+    --compaction) COMPACTION="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage ;;
   esac
@@ -194,6 +205,13 @@ case "$THINKING" in
   off|minimal|low|medium|high|xhigh) ;;
   *)
     echo "ERROR: --thinking '$THINKING' is not a recognized level. Must be one of: off, minimal, low, medium, high, xhigh." >&2
+    exit 1
+    ;;
+esac
+case "$COMPACTION" in
+  on|off) ;;
+  *)
+    echo "ERROR: --compaction '$COMPACTION' is not recognized. Must be 'on' or 'off'." >&2
     exit 1
     ;;
 esac
@@ -253,6 +271,19 @@ if [[ ! -f harness_state.json ]]; then
   python3 harness.py init --language "$LANGUAGE"
 fi
 
+# Cell-local pi project settings: pi merges a trusted project's
+# .pi/settings.json OVER the operator's global settings.json for THIS
+# child only (the operator's own global default is never touched). The
+# child is already trusted (run_cell.sh passes -a below), so this takes
+# effect. Written on every run (idempotent) so a stale file never lingers
+# if --compaction is flipped between runs of the same cell.
+mkdir -p "$CELL_DIR/.pi"
+if [[ "$COMPACTION" == "on" ]]; then
+  printf '{"compaction":{"enabled":true}}\n' > "$CELL_DIR/.pi/settings.json"
+else
+  printf '{"compaction":{"enabled":false}}\n' > "$CELL_DIR/.pi/settings.json"
+fi
+
 SESSION_DIR="$CELL_DIR/.pi-sessions"
 mkdir -p "$SESSION_DIR"
 # Sanitize a grid-dimension value into a session-id-safe token, mirroring
@@ -269,19 +300,41 @@ RUN_LOG="$CELL_DIR/.run_cell.log"
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Parses `harness.py status` once into ST_* globals.
+# ST_* globals, seeded with safe defaults so a transient harness_status
+# failure (see below) always has something sane to fall back to, even on
+# the very first call.
+ST_SOLVED=0; ST_FAILED=0; ST_SKIPPED=0; ST_ACTIVE=0; ST_REMAINING=0
+ST_TESTS="0/0"; ST_CURRENT=""; ST_FINALIZED=0
+
+# Parses `harness.py status` into ST_* globals. RESILIENT to a transient
+# failure or garbled read -- the heartbeat's `status` READ can race the
+# child's `submit`/`fetch`/`skip` WRITE of harness_state.json (observed in
+# practice: a one-off Python JSONDecodeError traceback + an empty-metric
+# heartbeat line). Retries once after a short pause; if it still fails,
+# KEEPS the previous ST_* values and returns non-zero -- callers never see a
+# traceback leak into run_cell.sh's own output or a blank/garbled heartbeat.
+# The shared benchmark_harness/harness.py itself is NOT modified (it's the
+# paper's code, out of scope) -- this is purely a resilient READ here.
 harness_status() {
-  local out
-  out="$(python3 harness.py status)"
-  # "Solved:" prints as "N/80" -- take just N (it's used in arithmetic below).
-  ST_SOLVED=$(awk '/^Solved:/{split($2,a,"/"); print a[1]}' <<<"$out")
-  ST_FAILED=$(awk '/^Failed:/{print $2}' <<<"$out")
-  ST_SKIPPED=$(awk '/^Skipped:/{print $2}' <<<"$out")
-  ST_ACTIVE=$(awk '/^Active:/{print $2}' <<<"$out")
-  ST_REMAINING=$(awk '/^Remaining:/{print $2}' <<<"$out")
-  ST_TESTS=$(awk '/^Test cases passed:/{print $4}' <<<"$out")
-  ST_CURRENT=$(awk -F': ' '/^Current problem:/{print $2}' <<<"$out")
-  ST_FINALIZED=$(( ST_SOLVED + ST_FAILED + ST_SKIPPED ))
+  local out rc attempt
+  for attempt in 1 2; do
+    out="$(python3 harness.py status 2>/dev/null)"
+    rc=$?
+    if [[ "$rc" -eq 0 ]] && grep -q '^Solved:' <<<"$out"; then
+      # "Solved:" prints as "N/80" -- take just N (used in arithmetic below).
+      ST_SOLVED=$(awk '/^Solved:/{split($2,a,"/"); print a[1]}' <<<"$out")
+      ST_FAILED=$(awk '/^Failed:/{print $2}' <<<"$out")
+      ST_SKIPPED=$(awk '/^Skipped:/{print $2}' <<<"$out")
+      ST_ACTIVE=$(awk '/^Active:/{print $2}' <<<"$out")
+      ST_REMAINING=$(awk '/^Remaining:/{print $2}' <<<"$out")
+      ST_TESTS=$(awk '/^Test cases passed:/{print $4}' <<<"$out")
+      ST_CURRENT=$(awk -F': ' '/^Current problem:/{print $2}' <<<"$out")
+      ST_FINALIZED=$(( ST_SOLVED + ST_FAILED + ST_SKIPPED ))
+      return 0
+    fi
+    [[ "$attempt" -eq 1 ]] && sleep 0.3
+  done
+  return 1
 }
 
 # Prints "<mtime_epoch> <size_bytes>" for the most recently modified .jsonl
@@ -368,7 +421,13 @@ finalize_export() {
       return 0
       ;;
   esac
-  python3 harness.py export || true
+  # Suppress stderr only (not stdout -- "Exported session data to ..." is a
+  # useful confirmation line): a corrupt/unreadable state file at export
+  # time must not leak a Python traceback into run_cell.sh's own output
+  # either (same race as harness_status above). export.json is simply not
+  # written in that case -- the `cp` below is a no-op, and finalize_export's
+  # STOP_REASON guard already skips the artifact copy for an untrusted run.
+  python3 harness.py export 2>/dev/null || true
   mkdir -p "$(dirname "$ARTIFACT_PATH")"
   [[ -f "$CELL_DIR/export.json" ]] && cp "$CELL_DIR/export.json" "$ARTIFACT_PATH"
 }

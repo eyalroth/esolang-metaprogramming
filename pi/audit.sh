@@ -218,6 +218,31 @@ else
   fail "effective-model-assertion: expected finalize_export to skip on an effective-model mismatch/unverifiable run"
 fi
 
+# child-compaction: run_cell.sh writes a cell-local .pi/settings.json so pi
+# auto-compacts for the child (matching the paper's native-harness default),
+# WITHOUT touching the operator's own global settings.json, with an
+# on|off escape hatch.
+if grep -q -- '--compaction) COMPACTION=' "$RUN_CELL" \
+   && grep -q '\.pi/settings\.json' "$RUN_CELL" \
+   && grep -q '"compaction":{"enabled":true}' "$RUN_CELL" \
+   && grep -q '"compaction":{"enabled":false}' "$RUN_CELL"; then
+  pass "child-compaction: run_cell.sh writes a cell-local .pi/settings.json enabling/disabling compaction per --compaction"
+else
+  fail "child-compaction: expected cell-local .pi/settings.json compaction wiring missing from run_cell.sh"
+fi
+
+# heartbeat-status-resilience: harness_status must retry + keep last-known
+# ST_* values + suppress the subprocess traceback on a transient/garbled
+# read (the observed race with the child's concurrent state-file write).
+if grep -q 'harness_status()' "$RUN_CELL" \
+   && grep -q '2>/dev/null' "$RUN_CELL" \
+   && grep -qE 'for attempt in 1 2' "$RUN_CELL" \
+   && grep -qi 'KEEPS the previous ST_\* values' "$RUN_CELL"; then
+  pass "heartbeat-status-resilience: harness_status retries + keeps last-known values + suppresses the subprocess traceback"
+else
+  fail "heartbeat-status-resilience: expected retry/keep-last-known/stderr-suppression wiring missing from harness_status in run_cell.sh"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"

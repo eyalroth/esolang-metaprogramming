@@ -93,6 +93,15 @@ else
   ls -la "$S1_CELL_DIR"/.pi-sessions/ 2>&1
 fi
 
+# Default (no --compaction flag) must enable auto-compaction for the child
+# via a cell-local .pi/settings.json, matching the paper's own harnesses.
+if [[ -f "$S1_CELL_DIR/.pi/settings.json" ]] && grep -q '"enabled":true' "$S1_CELL_DIR/.pi/settings.json"; then
+  pass "cell-local .pi/settings.json enables compaction by default"
+else
+  fail "expected $S1_CELL_DIR/.pi/settings.json to enable compaction by default"
+  cat "$S1_CELL_DIR/.pi/settings.json" 2>&1
+fi
+
 if grep -q "ARTIFACT=$S1_ARTIFACT\|copied to $S1_ARTIFACT" "$RUN_OUT" || [[ -f "$S1_ARTIFACT" ]]; then
   pass "artifact landed at the nested grid path ($S1_ARTIFACT)"
 else
@@ -313,6 +322,111 @@ rm -f "$S4_ARTIFACT"
 rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S4_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S4_PROVIDER"
 rm -f "$MISMATCH_OUT"
+
+# ===========================================================================
+# Scenario 5: --compaction off writes a cell-local .pi/settings.json that
+# DISABLES compaction (the escape hatch -- default is ON, see scenario 1).
+# ===========================================================================
+echo
+echo "--- scenario 5: --compaction off disables compaction in the cell-local settings ---"
+
+S5_PROVIDER="test-provider-s5"
+S5_MODEL="fake-model"
+S5_THINKING="low"
+
+read -r S5_CELL_DIR S5_ARTIFACT < <(resolve_cell "$S5_PROVIDER" "$S5_MODEL" "$S5_THINKING" "$LANGUAGE")
+rm -f "$S5_CELL_DIR"/harness_state.json "$S5_CELL_DIR"/export.json "$S5_CELL_DIR"/fake_*.bf "$S5_CELL_DIR"/.run_cell.log
+rm -rf "$S5_CELL_DIR"/.pi-sessions "$S5_CELL_DIR"/.pi
+rm -f "$S5_ARTIFACT"
+
+COMPACTION_OFF_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=1 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S5_PROVIDER/$S5_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S5_MODEL" --provider "$S5_PROVIDER" --thinking "$S5_THINKING" \
+    --language "$LANGUAGE" --compaction off --max-continuations 0 --heartbeat-interval 1 --stall-timeout 60 \
+    --dataset-file "$REDACTED_DATASET" > "$COMPACTION_OFF_OUT" 2>&1
+
+if [[ -f "$S5_CELL_DIR/.pi/settings.json" ]] && grep -q '"enabled":false' "$S5_CELL_DIR/.pi/settings.json"; then
+  pass "scenario 5: --compaction off writes a cell-local .pi/settings.json with compaction disabled"
+else
+  fail "scenario 5: expected $S5_CELL_DIR/.pi/settings.json to disable compaction"
+  cat "$COMPACTION_OFF_OUT"
+fi
+
+rm -f "$S5_CELL_DIR"/harness_state.json "$S5_CELL_DIR"/export.json "$S5_CELL_DIR"/fake_*.bf "$S5_CELL_DIR"/.run_cell.log
+rm -rf "$S5_CELL_DIR"/.pi-sessions "$S5_CELL_DIR"/.pi
+rm -f "$S5_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S5_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S5_PROVIDER"
+rm -f "$COMPACTION_OFF_OUT"
+
+# ===========================================================================
+# Scenario 6: a corrupted/unreadable harness_state.json (the observed
+# heartbeat-vs-child-write race) must NOT leak a Python traceback or an
+# empty-metric heartbeat line, and run_cell.sh must still terminate cleanly
+# (via the stall watchdog, since the corrupt-state child never progresses).
+# ===========================================================================
+echo
+echo "--- scenario 6: a corrupted harness_state.json doesn't crash or leak a traceback ---"
+
+S6_PROVIDER="test-provider-s6"
+S6_MODEL="fake-model"
+S6_THINKING="low"
+
+read -r S6_CELL_DIR S6_ARTIFACT < <(resolve_cell "$S6_PROVIDER" "$S6_MODEL" "$S6_THINKING" "$LANGUAGE")
+rm -f "$S6_CELL_DIR"/harness_state.json "$S6_CELL_DIR"/export.json "$S6_CELL_DIR"/fake_*.bf "$S6_CELL_DIR"/.run_cell.log
+rm -rf "$S6_CELL_DIR"/.pi-sessions "$S6_CELL_DIR"/.pi
+rm -f "$S6_ARTIFACT"
+
+CORRUPT_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" \
+  FAKE_PI_MODELS="$S6_PROVIDER/$S6_MODEL" \
+  FAKE_PI_CORRUPT_STATE=1 FAKE_PI_CORRUPT_IDLE=30 \
+  "$PI_DIR/run_cell.sh" --model "$S6_MODEL" --provider "$S6_PROVIDER" --thinking "$S6_THINKING" \
+    --language "$LANGUAGE" --heartbeat-interval 1 --stall-timeout 8 \
+    --dataset-file "$REDACTED_DATASET" > "$CORRUPT_OUT" 2>&1
+CORRUPT_RC=$?
+
+if grep -qi 'Traceback' "$CORRUPT_OUT"; then
+  fail "scenario 6: a Python traceback leaked into run_cell.sh's own output"
+  cat "$CORRUPT_OUT"
+else
+  pass "scenario 6: no Python traceback leaked despite a persistently corrupt harness_state.json"
+fi
+
+if grep -qE 'heartbeat -- solved=/80|solved= failed=' "$CORRUPT_OUT"; then
+  fail "scenario 6: an empty/garbled-metric heartbeat line was printed"
+else
+  pass "scenario 6: heartbeat lines kept sane (last-known) metrics despite the corrupt state file"
+fi
+
+if grep -q '\[run_cell\] heartbeat' "$CORRUPT_OUT"; then
+  pass "scenario 6: heartbeat kept running against the corrupt state file (didn't abort the loop)"
+else
+  fail "scenario 6: expected at least one heartbeat line"
+  cat "$CORRUPT_OUT"
+fi
+
+if [[ "$CORRUPT_RC" -ne 0 ]] && grep -qi 'STALL DETECTED' "$CORRUPT_OUT"; then
+  pass "scenario 6: run_cell.sh still terminated cleanly via the stall watchdog (rc=$CORRUPT_RC)"
+else
+  fail "scenario 6: expected a stall-watchdog termination, got rc=$CORRUPT_RC"
+  cat "$CORRUPT_OUT"
+fi
+
+sleep 1
+if ps -A -o command | grep -F "$PI_TESTS_DIR/fake_pi.sh" | grep -v grep > /dev/null; then
+  fail "scenario 6: a fake_pi.sh process is still running after the stall kill (process-group leak)"
+else
+  pass "scenario 6: no orphaned fake_pi.sh process after the stall kill"
+fi
+
+rm -f "$S6_CELL_DIR"/harness_state.json "$S6_CELL_DIR"/export.json "$S6_CELL_DIR"/fake_*.bf "$S6_CELL_DIR"/.run_cell.log
+rm -rf "$S6_CELL_DIR"/.pi-sessions "$S6_CELL_DIR"/.pi
+rm -f "$S6_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S6_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S6_PROVIDER"
+rm -f "$CORRUPT_OUT"
 
 echo
 if [[ "$FAIL" -eq 0 ]]; then

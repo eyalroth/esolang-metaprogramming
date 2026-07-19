@@ -138,6 +138,15 @@ Optional flags:
   reading only the FIRST (boot) `model_change` event and missing a silent
   override that lands a moment later (the real bug: two `model_change`
   events ~130ms apart, the second one wrong).
+- `--compaction on|off` (default **on**) — whether the child auto-compacts
+  its context when full. `run_cell.sh` writes a cell-local `.pi/settings.json`
+  that pi merges **over your global setting for this child only** (your own
+  global default is never touched). ON matches the paper's own harnesses
+  (e.g. Claude Code auto-compacts by default) — that's how a single session
+  survives all 80 problems instead of collapsing (fetch-spamming the rest
+  into skips, since `harness.py fetch` auto-marks an un-submitted active
+  problem `skipped`) once context fills. Turn it off only to specifically
+  observe/study that collapse.
 
 ### Result keying: the full experimental grid
 
