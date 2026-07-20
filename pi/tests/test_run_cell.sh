@@ -508,6 +508,85 @@ rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S7_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S7_PROVIDER"
 rm -f "$RESUME_OUT"
 
+# ===========================================================================
+# Scenario 8: a genuinely frozen MONITOR LOOP (the machine was suspended)
+# must ABORT the run (STOP_REASON=interrupted, non-zero exit), not reset
+# the liveness clock and try to continue into a post-sleep child (that was
+# round 8's behavior; reverted per the operator's explicit choice -- a real
+# suspend kills the in-flight API call, so riding it out just burns the
+# continuation budget on empty turns). We simulate the suspend with a real
+# SIGSTOP/SIGCONT on run_cell.sh's own process -- the closest black-box
+# analog to an OS suspend: this process genuinely gets zero CPU time for
+# the duration, so its own loop_gap measurement is exercised for real (we
+# only stop the run_cell.sh process itself, not fake_pi.sh underneath it --
+# sufficient to exercise the specific mechanism being tested: run_cell.sh's
+# own perspective on how long ITS loop was frozen).
+# ===========================================================================
+echo
+echo "--- scenario 8: a frozen monitor loop (simulated machine suspend) aborts the run ---"
+
+S8_PROVIDER="test-provider-s8"
+S8_MODEL="fake-model"
+S8_THINKING="low"
+
+read -r S8_CELL_DIR S8_ARTIFACT < <(resolve_cell "$S8_PROVIDER" "$S8_MODEL" "$S8_THINKING" "$LANGUAGE")
+rm -f "$S8_CELL_DIR"/harness_state.json "$S8_CELL_DIR"/export.json "$S8_CELL_DIR"/fake_*.bf "$S8_CELL_DIR"/.run_cell.log
+rm -rf "$S8_CELL_DIR"/.pi-sessions "$S8_CELL_DIR"/.pi
+rm -f "$S8_ARTIFACT"
+
+SUSPEND_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=30 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S8_PROVIDER/$S8_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S8_MODEL" --provider "$S8_PROVIDER" --thinking "$S8_THINKING" \
+    --language "$LANGUAGE" --fresh --heartbeat-interval 1 --stall-timeout 300 --max-suspend-gap 5 \
+    --dataset-file "$REDACTED_DATASET" > "$SUSPEND_OUT" 2>&1 &
+S8_PID=$!
+
+# Let it clear argument validation, model pre-flight, and effective-model
+# verification, and get well into the main monitor loop.
+sleep 5
+
+kill -STOP "$S8_PID" 2>/dev/null
+sleep 8   # > --max-suspend-gap (5s)
+kill -CONT "$S8_PID" 2>/dev/null
+
+wait "$S8_PID"
+SUSPEND_RC=$?
+
+if grep -qi 'almost certainly suspended' "$SUSPEND_OUT" && grep -q 'reason: interrupted' "$SUSPEND_OUT"; then
+  pass "scenario 8: a frozen monitor loop was detected and the run stopped with reason=interrupted"
+else
+  fail "scenario 8: expected the frozen monitor loop to be detected as a suspend and stop with reason=interrupted"
+  cat "$SUSPEND_OUT"
+fi
+
+if grep -qi 'STALL DETECTED' "$SUSPEND_OUT"; then
+  fail "scenario 8: the frozen-loop gap was misclassified as a STALL rather than a suspend"
+else
+  pass "scenario 8: the frozen-loop gap was not misclassified as an ordinary stall"
+fi
+
+if [[ "$SUSPEND_RC" -ne 0 ]]; then
+  pass "scenario 8: run_cell.sh exited non-zero after the detected suspend (rc=$SUSPEND_RC)"
+else
+  fail "scenario 8: expected a non-zero exit after the detected suspend, got rc=0"
+  cat "$SUSPEND_OUT"
+fi
+
+sleep 1
+if ps -A -o command | grep -F "$PI_TESTS_DIR/fake_pi.sh" | grep -v grep > /dev/null; then
+  fail "scenario 8: a fake_pi.sh process is still running after the suspend-abort (process-group leak)"
+else
+  pass "scenario 8: no orphaned fake_pi.sh process after the suspend-abort"
+fi
+
+rm -f "$S8_CELL_DIR"/harness_state.json "$S8_CELL_DIR"/export.json "$S8_CELL_DIR"/fake_*.bf "$S8_CELL_DIR"/.run_cell.log
+rm -rf "$S8_CELL_DIR"/.pi-sessions "$S8_CELL_DIR"/.pi
+rm -f "$S8_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S8_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S8_PROVIDER"
+rm -f "$SUSPEND_OUT"
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   echo "TEST_RUN_CELL: ALL CHECKS PASSED"

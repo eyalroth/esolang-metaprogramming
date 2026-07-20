@@ -70,6 +70,7 @@ MAX_PROBLEMS=""
 MAX_CONTINUATIONS=3
 HEARTBEAT_INTERVAL=15
 STALL_TIMEOUT=600
+MAX_SUSPEND_GAP=120
 POLL_INTERVAL=2
 EFFECTIVE_MODEL_WAIT=20
 EFFECTIVE_MODEL_SETTLE=2
@@ -125,8 +126,18 @@ Options:
                            cell (no --fresh) is safe across an arbitrary gap between runs
                            (including a laptop suspend): the liveness clock is baselined from
                            when THIS run started watching, never from the session file's own
-                           (possibly old) mtime, and a monitor-loop iteration gap far past its
-                           poll cadence (a suspend) is not counted as inactivity either.
+                           (possibly old) mtime -- see --max-suspend-gap below for what
+                           happens if the MACHINE itself sleeps DURING an active run.
+  --max-suspend-gap S     If a monitor-loop iteration gap far exceeds its own
+                           ~$POLL_INTERVAL(2)s poll cadence (default: $MAX_SUSPEND_GAP), THIS
+                           PROCESS -- and therefore the child -- was almost certainly frozen by
+                           a machine suspend, not genuinely idle that long. run_cell.sh does NOT
+                           try to ride this out: it KILLS the child and STOPS the run (reason
+                           "interrupted", non-zero exit) rather than resuming into a
+                           post-sleep child, because a long-enough suspend kills the in-flight
+                           API call, and continuing produced empty, budget-wasting turns in
+                           practice. Re-run (with or without --fresh) after a suspend rather
+                           than relying on this to paper over it -- it deliberately does not.
   --dataset-file PATH     Private JSON to use as HARNESS_PRIVATE_FILE
                            (default: benchmark_harness/private/esolang_full_private.local.json)
   --session-id ID         pi session id for the child (default:
@@ -193,6 +204,7 @@ while [[ $# -gt 0 ]]; do
     --max-continuations) MAX_CONTINUATIONS="${2:-}"; shift 2 ;;
     --heartbeat-interval) HEARTBEAT_INTERVAL="${2:-}"; shift 2 ;;
     --stall-timeout) STALL_TIMEOUT="${2:-}"; shift 2 ;;
+    --max-suspend-gap) MAX_SUSPEND_GAP="${2:-}"; shift 2 ;;
     --dataset-file) DATASET_FILE="${2:-}"; shift 2 ;;
     --session-id) SESSION_ID_OVERRIDE="${2:-}"; shift 2 ;;
     --allowed-tools) ALLOWED_TOOLS="${2:-}"; shift 2 ;;
@@ -569,19 +581,26 @@ while (( attempt <= max_attempts )); do
   prev_loop_ts=$last_activity_ts
   prev_mtime=""
   prev_size=""
-  # If a monitor-loop iteration gap far exceeds its own ~$POLL_INTERVAL(2)s
-  # poll cadence, THIS PROCESS (and therefore the child) was almost
-  # certainly frozen by a machine suspend, not genuinely idle for that long
-  # -- don't count the frozen wall-clock time against the child either.
-  SUSPEND_GAP_THRESHOLD=30
 
   while kill -0 "$PI_PID" 2>/dev/null; do
     now=$(date +%s)
     loop_gap=$(( now - prev_loop_ts ))
     prev_loop_ts=$now
-    if (( loop_gap >= SUSPEND_GAP_THRESHOLD )); then
-      echo "[run_cell] detected a ${loop_gap}s gap since the last liveness check (>= ${SUSPEND_GAP_THRESHOLD}s) -- likely this machine was suspended, not that the child hung. Resetting the liveness clock rather than counting the frozen wall-time as inactivity."
-      last_activity_ts=$now
+    if (( loop_gap >= MAX_SUSPEND_GAP )); then
+      # This monitor-loop iteration took far longer than its ~$POLL_INTERVAL(2)s
+      # cadence -- THIS PROCESS (and therefore the child) was almost certainly
+      # frozen by a machine suspend, not genuinely idle that long. We do NOT try
+      # to ride this out (round 8 used to reset the liveness clock and let the
+      # run continue): a long-enough suspend kills the in-flight API call, and
+      # in practice the model came back with empty, budget-wasting turns that
+      # burned the continuation cap for nothing. Stop cleanly instead -- the
+      # operator re-runs (with or without --fresh) rather than this papering
+      # over a dead post-sleep child.
+      echo "[run_cell] detected a ${loop_gap}s gap since the last liveness check (>= --max-suspend-gap ${MAX_SUSPEND_GAP}s) -- this machine was almost certainly suspended. Not attempting to resume the in-flight session across the sleep (a long suspend kills the child's in-flight API call) -- stopping this run. Re-run to continue."
+      kill_child_group
+      STOP_REASON="interrupted"
+      killed_this_attempt=1
+      break
     fi
 
     read -r live_mtime live_size < <(session_liveness)

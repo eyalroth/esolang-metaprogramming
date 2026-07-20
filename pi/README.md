@@ -135,14 +135,22 @@ Optional flags:
   false-killed by the old 240s default on a harder problem. If you see
   another false stall with a strong model at high/xhigh thinking on
   Hard/Extra-hard problems, raise this further. **Resuming an existing cell**
-  (no `--fresh`) is safe across any gap between runs, including a laptop
-  suspend spanning hours — the liveness clock is baselined from when *this*
-  run started watching (never from the session file's own, possibly-old
-  mtime), and a monitor-loop iteration gap far past its poll cadence (i.e.
-  the machine itself was asleep) is not counted as child inactivity either.
-  (A real bug, now fixed: a resumed run used to be killed on its very first
+  (no `--fresh`) launched any gap after the prior run — even hours later — is
+  safe: the liveness clock is baselined from when *this* run started
+  watching, never from the session file's own (possibly-old) mtime. (A real
+  bug, now fixed: a resumed run used to be killed on its very first
   heartbeat, because the pre-existing session file's mtime was from the
-  prior run.)
+  prior run.) See `--max-suspend-gap` below for what happens if the machine
+  sleeps *during* an active run instead.
+- `--max-suspend-gap S` (default 120) — if a monitor-loop iteration gap far
+  exceeds its own ~2s poll cadence, the machine was almost certainly
+  suspended (this process, and therefore the child, was frozen — not
+  genuinely idle that long). run_cell.sh does **not** try to ride this out:
+  it kills the child and stops the run (`reason: interrupted`, non-zero
+  exit) rather than resuming into a post-sleep child — a long-enough
+  suspend kills the in-flight API call, and in practice the model came back
+  with empty, continuation-budget-wasting turns instead of real work. Just
+  re-run (with or without `--fresh`) afterward.
 - `--dataset-file PATH` — override the private JSON (default: the
   `.local.json` from step 2).
 - `--effective-model-wait S` (default 20) — seconds to wait for the child to

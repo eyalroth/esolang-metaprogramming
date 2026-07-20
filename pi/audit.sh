@@ -258,14 +258,27 @@ fi
 # resume-liveness-baseline: the stall watchdog must measure inactivity as
 # CHANGE SINCE MONITORING STARTED, never the session file's own absolute
 # mtime (a resumed file legitimately carries an OLD mtime from a prior
-# run) -- plus a suspend/wake guard for a frozen monitor-loop iteration.
+# run).
 if grep -q 'last_activity_ts=' "$RUN_CELL" \
-   && grep -q 'SUSPEND_GAP_THRESHOLD' "$RUN_CELL" \
    && grep -qi 'never the file.s own absolute mtime' "$RUN_CELL" \
    && ! grep -q 'idle=\$(( now - live_mtime' "$RUN_CELL"; then
-  pass "resume-liveness-baseline: the stall watchdog baselines inactivity from monitor start (not the session file's own mtime) and guards against a suspended monitor loop"
+  pass "resume-liveness-baseline: the stall watchdog baselines inactivity from monitor start, not the session file's own mtime"
 else
-  fail "resume-liveness-baseline: expected the change-since-monitor-start liveness baseline + suspend guard wiring in run_cell.sh, and the old raw-mtime idle computation to be gone"
+  fail "resume-liveness-baseline: expected the change-since-monitor-start liveness baseline in run_cell.sh, and the old raw-mtime idle computation to be gone"
+fi
+
+# suspend-aborts-run: a frozen monitor-loop iteration (machine suspend) must
+# ABORT the run (kill child, STOP_REASON=interrupted, non-zero exit) --
+# NOT reset the liveness clock and try to continue into a post-sleep child
+# (round 8's behavior, reverted: a long suspend kills the in-flight API
+# call, and continuing produced empty budget-wasting turns in practice).
+if grep -q -- '--max-suspend-gap) MAX_SUSPEND_GAP=' "$RUN_CELL" \
+   && grep -q 'STOP_REASON="interrupted"' "$RUN_CELL" \
+   && grep -qi 'loop_gap >= MAX_SUSPEND_GAP' "$RUN_CELL" \
+   && ! grep -qi 'Resetting the liveness clock rather than counting' "$RUN_CELL"; then
+  pass "suspend-aborts-run: a detected machine suspend kills the child and stops the run (reason: interrupted) instead of continuing into a post-sleep child"
+else
+  fail "suspend-aborts-run: expected a detected suspend to abort the run (STOP_REASON=interrupted) rather than reset-and-continue"
 fi
 
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
