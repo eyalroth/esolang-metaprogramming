@@ -170,6 +170,25 @@ Optional flags:
   into skips, since `harness.py fetch` auto-marks an un-submitted active
   problem `skipped`) once context fills. Turn it off only to specifically
   observe/study that collapse.
+- `--bash-timeout S` (default **120** = 2min) — default timeout (seconds)
+  injected into the child's `bash` tool calls when the model omits one. pi's
+  `bash` tool has **no default timeout of its own** — an un-timed command
+  (observed in a real run: the model fired a whole-filesystem `find /` while
+  debugging) can run forever, and unlike a genuine long *think* it produces
+  no session growth either, so it looks identical to a stall and wedges the
+  **entire run** until `--stall-timeout` eventually kills it minutes later.
+  The paper's own native harnesses don't have this gap (e.g. Claude Code
+  defaults `bash` to ~2min). `run_cell.sh` writes a cell-local
+  `.pi/supi/config.json` (`{"bash-timeout":{"defaultTimeout":S}}`) that the
+  [`@mrclrchtr/supi-bash-timeout`](https://www.npmjs.com/package/@mrclrchtr/supi-bash-timeout)
+  extension merges **over your global value for this child only** (your own
+  global default is never touched) — **this is only effective if that
+  extension is installed** in the pi being used; if it isn't, the file is
+  simply inert and behavior is unchanged from before. To install:
+  `pi install npm:@mrclrchtr/supi-bash-timeout`, then optionally set a very
+  high global default (e.g. `{"bash-timeout":{"defaultTimeout":86400}}` in
+  `~/.pi/agent/supi/config.json`) so your *own* interactive sessions stay
+  effectively unbounded while benchmark cells stay bounded to `--bash-timeout`.
 
 ### Result keying: the full experimental grid
 

@@ -587,6 +587,72 @@ rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S8_PROVIDER"
 rm -rf "$PI_DIR/artifacts/$S8_PROVIDER"
 rm -f "$SUSPEND_OUT"
 
+# ===========================================================================
+# Scenario 9: run_cell.sh writes a cell-local .pi/supi/config.json bounding
+# the child's un-timed bash calls (the @mrclrchtr/supi-bash-timeout
+# extension's own config, separate from pi's settings.json) -- default 120s,
+# and overridable via --bash-timeout. This is what stops a single runaway
+# command (e.g. an unbounded `find /`) from wedging the ENTIRE run.
+# ===========================================================================
+echo
+echo "--- scenario 9: cell-local .pi/supi/config.json bounds the child's bash-tool default timeout ---"
+
+S9_PROVIDER="test-provider-s9"
+S9_MODEL="fake-model"
+S9_THINKING="low"
+
+read -r S9_CELL_DIR S9_ARTIFACT < <(resolve_cell "$S9_PROVIDER" "$S9_MODEL" "$S9_THINKING" "$LANGUAGE")
+rm -f "$S9_CELL_DIR"/harness_state.json "$S9_CELL_DIR"/export.json "$S9_CELL_DIR"/fake_*.bf "$S9_CELL_DIR"/.run_cell.log
+rm -rf "$S9_CELL_DIR"/.pi-sessions "$S9_CELL_DIR"/.pi
+rm -f "$S9_ARTIFACT"
+
+BASH_TIMEOUT_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=1 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S9_PROVIDER/$S9_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S9_MODEL" --provider "$S9_PROVIDER" --thinking "$S9_THINKING" \
+    --language "$LANGUAGE" --max-continuations 0 --heartbeat-interval 1 --stall-timeout 60 \
+    --dataset-file "$REDACTED_DATASET" > "$BASH_TIMEOUT_OUT" 2>&1
+
+if [[ -f "$S9_CELL_DIR/.pi/supi/config.json" ]] && grep -q '"defaultTimeout":120' "$S9_CELL_DIR/.pi/supi/config.json"; then
+  pass "scenario 9: run_cell.sh writes a cell-local .pi/supi/config.json with the default (120s) bash timeout"
+else
+  fail "scenario 9: expected $S9_CELL_DIR/.pi/supi/config.json with defaultTimeout=120"
+  cat "$BASH_TIMEOUT_OUT"
+fi
+
+rm -f "$S9_CELL_DIR"/harness_state.json "$S9_CELL_DIR"/export.json "$S9_CELL_DIR"/fake_*.bf "$S9_CELL_DIR"/.run_cell.log
+rm -rf "$S9_CELL_DIR"/.pi-sessions "$S9_CELL_DIR"/.pi
+rm -f "$S9_ARTIFACT"
+
+S9B_OUT="$(mktemp)"
+PI_BIN="$PI_TESTS_DIR/fake_pi.sh" FAKE_PI_CYCLES=1 FAKE_PI_SLEEP=1 \
+  FAKE_PI_MODELS="$S9_PROVIDER/$S9_MODEL" \
+  "$PI_DIR/run_cell.sh" --model "$S9_MODEL" --provider "$S9_PROVIDER" --thinking "$S9_THINKING" \
+    --language "$LANGUAGE" --bash-timeout 45 --max-continuations 0 --heartbeat-interval 1 --stall-timeout 60 \
+    --dataset-file "$REDACTED_DATASET" > "$S9B_OUT" 2>&1
+
+if [[ -f "$S9_CELL_DIR/.pi/supi/config.json" ]] && grep -q '"defaultTimeout":45' "$S9_CELL_DIR/.pi/supi/config.json"; then
+  pass "scenario 9: --bash-timeout 45 overrides the cell-local config's defaultTimeout"
+else
+  fail "scenario 9: expected --bash-timeout 45 to produce defaultTimeout=45 in the cell-local config"
+  cat "$S9B_OUT"
+fi
+
+S9C_OUT="$(mktemp)"
+if "$PI_DIR/run_cell.sh" --model "$S9_MODEL" --provider "$S9_PROVIDER" --thinking "$S9_THINKING" \
+    --language "$LANGUAGE" --bash-timeout 0 --dataset-file "$REDACTED_DATASET" > "$S9C_OUT" 2>&1; then
+  fail "scenario 9: --bash-timeout 0 should have been rejected but run_cell.sh exited 0"
+else
+  pass "scenario 9: --bash-timeout 0 (not a positive integer) is rejected"
+fi
+
+rm -f "$S9_CELL_DIR"/harness_state.json "$S9_CELL_DIR"/export.json "$S9_CELL_DIR"/fake_*.bf "$S9_CELL_DIR"/.run_cell.log
+rm -rf "$S9_CELL_DIR"/.pi-sessions "$S9_CELL_DIR"/.pi
+rm -f "$S9_ARTIFACT"
+rm -rf "$REPO_ROOT/experiments/01_main_experiments/pi/$S9_PROVIDER"
+rm -rf "$PI_DIR/artifacts/$S9_PROVIDER"
+rm -f "$BASH_TIMEOUT_OUT" "$S9B_OUT" "$S9C_OUT"
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   echo "TEST_RUN_CELL: ALL CHECKS PASSED"

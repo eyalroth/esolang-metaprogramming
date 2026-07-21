@@ -281,6 +281,21 @@ else
   fail "suspend-aborts-run: expected a detected suspend to abort the run (STOP_REASON=interrupted) rather than reset-and-continue"
 fi
 
+# child-bash-timeout: run_cell.sh writes a cell-local .pi/supi/config.json so
+# the @mrclrchtr/supi-bash-timeout extension (if installed) bounds the
+# child's un-timed bash calls -- pi's bash tool has no default timeout of
+# its own, so a single runaway command (e.g. an unbounded `find /`) can
+# wedge the ENTIRE run until --stall-timeout kills it. WITHOUT touching the
+# operator's own global supi config.
+if grep -q -- '--bash-timeout) BASH_TIMEOUT=' "$RUN_CELL" \
+   && grep -q '\.pi/supi/config\.json' "$RUN_CELL" \
+   && grep -q '"bash-timeout":{"defaultTimeout"' "$RUN_CELL" \
+   && grep -q 'BASH_TIMEOUT=120' "$RUN_CELL"; then
+  pass "child-bash-timeout: run_cell.sh writes a cell-local .pi/supi/config.json bounding the child's un-timed bash calls per --bash-timeout"
+else
+  fail "child-bash-timeout: expected cell-local .pi/supi/config.json bash-timeout wiring missing from run_cell.sh"
+fi
+
 TEST_RUN_CELL="$PI_DIR/tests/test_run_cell.sh"
 if [[ ! -x "$TEST_RUN_CELL" ]]; then
   fail "driver-rebuild: $TEST_RUN_CELL missing or not executable"

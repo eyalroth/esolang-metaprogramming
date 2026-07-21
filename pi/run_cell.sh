@@ -78,6 +78,7 @@ DATASET_FILE="$REPO_ROOT/benchmark_harness/private/esolang_full_private.local.js
 SESSION_ID_OVERRIDE=""
 ALLOWED_TOOLS="read,bash,edit,write"
 COMPACTION="on"
+BASH_TIMEOUT=120
 
 usage() {
   cat >&2 <<EOF
@@ -167,6 +168,18 @@ Options:
                            collapsing (fetch-spamming the rest into skips) once context
                            fills. Turn it off only if you specifically want to observe/study
                            that collapse.
+  --bash-timeout S        Default timeout (seconds) injected into the CHILD's bash tool calls
+                           when the model omits one (default: $BASH_TIMEOUT = 2min). pi's bash
+                           tool has NO default timeout of its own -- an un-timed command
+                           (observed: a whole-filesystem \`find /\` while debugging) can run
+                           forever and wedge the ENTIRE run until --stall-timeout kills it,
+                           unlike the paper's native harnesses (e.g. Claude Code defaults bash
+                           to ~2min). Written to a cell-local .pi/supi/config.json
+                           (\`{"bash-timeout":{"defaultTimeout":S}}\`) that the
+                           @mrclrchtr/supi-bash-timeout extension merges OVER your global value
+                           for THIS child only (your own global default is never touched) --
+                           EFFECTIVE ONLY if that extension is installed in the pi being used;
+                           if it isn't, this file is simply inert and behavior is unchanged.
 
 Result keying: state + the export artifact are keyed on the FULL grid --
 harness (this pi/ dir) x provider x model x thinking x language -- at
@@ -211,6 +224,7 @@ while [[ $# -gt 0 ]]; do
     --effective-model-wait) EFFECTIVE_MODEL_WAIT="${2:-}"; shift 2 ;;
     --effective-model-settle) EFFECTIVE_MODEL_SETTLE="${2:-}"; shift 2 ;;
     --compaction) COMPACTION="${2:-}"; shift 2 ;;
+    --bash-timeout) BASH_TIMEOUT="${2:-}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage ;;
   esac
@@ -242,6 +256,10 @@ case "$COMPACTION" in
     exit 1
     ;;
 esac
+if ! [[ "$BASH_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: --bash-timeout '$BASH_TIMEOUT' is not a positive integer (seconds)." >&2
+  exit 1
+fi
 if [[ -z "$LANGUAGE" ]]; then
   echo "ERROR: --language is required." >&2
   exit 1
@@ -310,6 +328,22 @@ if [[ "$COMPACTION" == "on" ]]; then
 else
   printf '{"compaction":{"enabled":false}}\n' > "$CELL_DIR/.pi/settings.json"
 fi
+
+# Cell-local bash-timeout override for the @mrclrchtr/supi-bash-timeout
+# extension (a SEPARATE config system from pi's own settings.json --
+# resolution is defaults <- global <- project, from .pi/supi/config.json
+# relative to cwd, i.e. THIS cell dir for the child). pi's bash tool has no
+# default timeout of its own, so an un-timed command from the model can run
+# forever and wedge the whole run until --stall-timeout kills it (observed:
+# a whole-filesystem `find /`). This file bounds the child's un-timed bash
+# calls to --bash-timeout seconds without touching the operator's own
+# (likely much higher) global default. It is EFFECTIVE ONLY if that
+# extension happens to be installed in the pi being used -- if not, the
+# file is simply inert and behavior is unchanged. Written on every run
+# (idempotent) so a stale value never lingers if --bash-timeout is changed
+# between runs of the same cell.
+mkdir -p "$CELL_DIR/.pi/supi"
+printf '{"bash-timeout":{"defaultTimeout":%s}}\n' "$BASH_TIMEOUT" > "$CELL_DIR/.pi/supi/config.json"
 
 SESSION_DIR="$CELL_DIR/.pi-sessions"
 mkdir -p "$SESSION_DIR"
