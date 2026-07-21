@@ -6,3 +6,12 @@ __pycache__/
 harness_state.json
 export.json
 logs/
+
+# pi tooling (pi/) -- never commit the real dataset or run artifacts
+benchmark_harness/private/esolang_full_private.local.json
+pi/artifacts/
+.pi-sessions/
+
+# pi grid cells are built ON DEMAND (keyed by provider/model/thinking/language,
+# see pi/setup_cells.py) -- never committed, always regenerated locally.
+/experiments/01_main_experiments/pi/

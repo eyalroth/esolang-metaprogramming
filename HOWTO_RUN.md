@@ -1,5 +1,10 @@
 # How to run a cell with each provider
 
+> **Running with `pi`?** See [`pi/README.md`](pi/README.md) for a wrapper that
+> drives the harness with the `pi` CLI, including your own personal config
+> (extensions/skills/AGENTS.md), plus the real-dataset loader and a headless
+> driver script.
+
 Every cell directory under `experiments/` has the same shape:
 
 ```
